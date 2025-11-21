@@ -1,0 +1,24 @@
+{
+  "name": "dmail-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "dMail — Decentralized Email using Filecoin Onchain Cloud + ENS",
+  "workspaces": [
+    "frontend",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace frontend",
+    "build": "npm run build --workspace frontend",
+    "preview": "npm run preview --workspace frontend",
+    "format": "prettier --write .",
+    "lint": "npm run lint --workspace frontend"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3"
+  },
+  "license": "MIT"
+}

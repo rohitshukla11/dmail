@@ -1,0 +1,1301 @@
+/* dMail v2 UI update: sent badges + signature pill styles. */
+:root {
+  --color-primary: #c2e7ff;
+  --color-primary-hover: #a8c7fa;
+  --color-sidebar: #f6f8fc;
+  --color-hover: #f2f6fc;
+  --color-active: #d3e3fd;
+  --color-border: #dadce0;
+  --color-text: #202124;
+  --color-text-secondary: #5f6368;
+  --color-error: #ea4335;
+  --color-success: #1e8e3e;
+  --compose-btn: #0b57d0;
+  --compose-btn-hover: #174ea6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: 'Google Sans', Roboto, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background: #fff;
+  color: var(--color-text);
+  width: 100vw;
+  overflow-x: hidden;
+}
+
+#root {
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* Gmail Layout */
+.gmail-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  position: relative;
+  max-width: 100vw;
+  overflow: hidden;
+}
+
+/* Header */
+.gmail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 64px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: #fff;
+  gap: 16px;
+  width: 100%;
+  max-width: 100vw;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.menu-btn {
+  background: none;
+  border: none;
+  font-size: 20px;
+  padding: 8px;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--color-text);
+}
+
+.menu-btn:hover {
+  background: var(--color-hover);
+}
+
+.logo {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 400;
+  color: var(--color-text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  letter-spacing: -0.25px;
+}
+
+.logo-icon {
+  font-size: 24px;
+}
+
+.header-center {
+  flex: 1;
+  max-width: 720px;
+}
+
+.search-bar {
+  display: flex;
+  align-items: center;
+  background: var(--color-sidebar);
+  border-radius: 8px;
+  padding: 0 12px;
+  height: 48px;
+  transition: background 200ms;
+}
+
+.search-bar:focus-within {
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.24);
+}
+
+.search-icon {
+  margin-right: 12px;
+  color: var(--color-text-secondary);
+  font-size: 18px;
+}
+
+.search-bar input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 16px;
+  color: var(--color-text);
+}
+
+.search-bar input::placeholder {
+  color: var(--color-text-secondary);
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.wallet-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wallet-indicator {
+  font-size: 12px;
+  line-height: 1;
+  animation: pulse 2s infinite;
+}
+
+.wallet-indicator.connected {
+  color: var(--color-success);
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  padding: 8px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 20px;
+  transition: background 150ms;
+}
+
+.icon-btn:hover {
+  background: var(--color-hover);
+}
+
+.user-info {
+  font-size: 14px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+  font-weight: 500;
+}
+
+/* Container */
+.gmail-container {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  width: 100vw;
+  max-width: 100vw;
+  position: relative;
+}
+
+/* Sidebar */
+.gmail-sidebar {
+  width: 256px;
+  min-width: 256px;
+  max-width: 256px;
+  background: #fff;
+  border-right: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0;
+  flex: 0 0 256px;
+}
+
+.compose-btn {
+  margin: 8px 8px 16px 8px;
+  padding: 12px 24px;
+  background: var(--compose-btn);
+  color: white;
+  border: none;
+  border-radius: 24px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: background 200ms, box-shadow 200ms;
+  width: fit-content;
+}
+
+.compose-btn:hover:not(:disabled) {
+  background: var(--compose-btn-hover);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.compose-btn:disabled {
+  background: #dadce0;
+  color: #80868b;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.compose-icon {
+  font-size: 20px;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  border-radius: 0 24px 24px 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text);
+  transition: background 100ms;
+  text-align: left;
+  gap: 12px;
+}
+
+.nav-item:hover {
+  background: var(--color-hover);
+}
+
+.nav-item.active {
+  background: var(--color-active);
+}
+
+.nav-icon {
+  font-size: 20px;
+  width: 24px;
+  text-align: center;
+}
+
+.nav-label {
+  flex: 1;
+}
+
+.nav-count {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: 16px;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.text-btn {
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 8px;
+  text-align: left;
+  border-radius: 4px;
+  transition: background 100ms;
+}
+
+.text-btn:hover:not(:disabled) {
+  background: var(--color-hover);
+}
+
+.text-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.private-key-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.key-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.key-hint {
+  font-size: 14px;
+  cursor: help;
+  opacity: 0.7;
+  transition: opacity 100ms;
+}
+
+.key-hint:hover {
+  opacity: 1;
+}
+
+.key-input {
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'Courier New', monospace;
+  width: 100%;
+}
+
+.key-input:focus {
+  outline: 2px solid var(--compose-btn);
+  border-color: transparent;
+}
+
+.key-help {
+  margin-top: 4px;
+}
+
+.key-help small {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  display: block;
+}
+
+/* Main Email List */
+.gmail-main {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #fff;
+  min-width: 0;
+  width: 100%;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--color-border);
+  height: 48px;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.select-all,
+.email-checkbox {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.toolbar-btn {
+  background: none;
+  border: none;
+  padding: 8px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 20px;
+  color: var(--color-text-secondary);
+  transition: background 100ms;
+}
+
+.toolbar-btn:hover {
+  background: var(--color-hover);
+}
+
+.email-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  width: 100%;
+}
+
+.email-item {
+  display: grid;
+  grid-template-columns: 40px 30px minmax(150px, 1fr) 2fr 100px;
+  align-items: center;
+  padding: 8px 16px;
+  gap: 12px;
+  border-bottom: 1px solid #f0f0f0;
+  cursor: pointer;
+  transition: box-shadow 100ms;
+  background: #fff;
+}
+
+.email-item:hover {
+  box-shadow: inset 1px 0 0 #dadce0, inset -1px 0 0 #dadce0, 0 1px 2px rgba(0, 0, 0, 0.1),
+    0 1px 3px rgba(0, 0, 0, 0.1);
+  z-index: 1;
+}
+
+.email-item.active {
+  background: var(--color-hover);
+  box-shadow: inset 4px 0 0 var(--compose-btn);
+}
+
+.email-star {
+  font-size: 18px;
+  color: #dadce0;
+  transition: color 100ms;
+}
+
+.email-item:hover .email-star {
+  color: var(--color-text-secondary);
+}
+
+.email-sender {
+  font-weight: 500;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text);
+}
+
+.email-subject {
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text);
+}
+
+.email-time {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+}
+
+/* Email Viewer */
+.gmail-viewer {
+  width: 0;
+  overflow: hidden;
+  background: #fff;
+  border-left: 1px solid var(--color-border);
+  transition: width 300ms ease, flex 300ms ease;
+}
+
+.gmail-viewer.open {
+  width: auto;
+  flex: 0 1 680px;
+  min-width: 480px;
+  max-width: 800px;
+}
+
+.email-detail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px 40px;
+}
+
+.email-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.email-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 400;
+  color: var(--color-text);
+  flex: 1;
+}
+
+.email-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.email-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+}
+
+.email-flags {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: -8px 0 16px 0;
+  flex-wrap: wrap;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--color-hover);
+  color: var(--color-text-secondary);
+}
+
+.pill-sent {
+  background: #e8f0fe;
+  color: var(--compose-btn);
+}
+
+.pill-success {
+  background: #e6f4ea;
+  color: var(--color-success);
+}
+
+.pill-error {
+  background: #fce8e6;
+  color: var(--color-error);
+}
+
+.pill-neutral {
+  background: #f1f3f4;
+  color: var(--color-text-secondary);
+}
+
+.sender-info {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.sender-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--compose-btn);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 500;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.sender-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sender-name {
+  font-weight: 500;
+  font-size: 14px;
+  color: var(--color-text);
+}
+
+.sender-email {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.email-timestamp {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.email-body {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--color-text);
+  margin-bottom: 24px;
+}
+
+.email-body pre {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: inherit;
+  margin: 0;
+}
+
+.email-attachments {
+  border-top: 1px solid var(--color-border);
+  padding-top: 16px;
+}
+
+.attachments-header {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: 12px;
+}
+
+.attachments-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attachment-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-sidebar);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 150ms, border-color 150ms;
+}
+
+.attachment-item:hover {
+  background: var(--color-hover);
+  border-color: var(--compose-btn);
+}
+
+.attachment-icon {
+  font-size: 20px;
+}
+
+.attachment-name {
+  flex: 1;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.attachment-size {
+  color: var(--color-text-secondary);
+}
+
+.attachment-download {
+  font-size: 16px;
+  color: var(--compose-btn);
+  margin-left: auto;
+  opacity: 0.7;
+  transition: opacity 150ms, transform 150ms;
+}
+
+.attachment-item:hover .attachment-download {
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+.empty-viewer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--color-text-secondary);
+}
+
+.empty-icon {
+  font-size: 72px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.empty-viewer p {
+  font-size: 14px;
+  margin: 0;
+}
+
+/* Compose Modal */
+.compose-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.compose-modal {
+  background: #fff;
+  border-radius: 8px;
+  width: 100%;
+  max-width: 640px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 10px rgba(0, 0, 0, 0.14), 0 3px 14px rgba(0, 0, 0, 0.12),
+    0 5px 5px rgba(0, 0, 0, 0.2);
+}
+
+.compose-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.compose-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  font-size: 20px;
+  padding: 4px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.close-btn:hover {
+  background: var(--color-hover);
+}
+
+.compose-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+.compose-field {
+  border-bottom: 1px solid var(--color-border);
+  position: relative;
+}
+
+.compose-field input {
+  width: 100%;
+  padding: 12px 20px;
+  border: none;
+  outline: none;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.compose-field input::placeholder {
+  color: var(--color-text-secondary);
+}
+
+.field-status {
+  padding: 8px 20px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.field-status.success {
+  color: var(--color-success);
+}
+
+.field-status.error {
+  color: var(--color-error);
+}
+
+.field-help {
+  padding: 6px 20px 0;
+}
+
+.field-help small {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+.compose-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 200px;
+}
+
+.compose-body textarea {
+  width: 100%;
+  height: 100%;
+  padding: 20px;
+  border: none;
+  outline: none;
+  font-size: 14px;
+  font-family: inherit;
+  resize: none;
+}
+
+.compose-body textarea::placeholder {
+  color: var(--color-text-secondary);
+}
+
+.compose-attachments {
+  padding: 12px 20px;
+  background: var(--color-sidebar);
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.compose-attachment {
+  font-size: 13px;
+  color: var(--color-text);
+}
+
+.compose-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--color-border);
+}
+
+.send-btn {
+  background: var(--compose-btn);
+  color: white;
+  border: none;
+  padding: 10px 24px;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 200ms;
+}
+
+.send-btn:hover:not(:disabled) {
+  background: var(--compose-btn-hover);
+}
+
+.send-btn:disabled {
+  background: #dadce0;
+  color: #80868b;
+  cursor: not-allowed;
+}
+
+.attach-btn {
+  background: none;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 14px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  transition: background 100ms;
+}
+
+.attach-btn:hover {
+  background: var(--color-hover);
+}
+
+/* Toast Notifications */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 12px 24px;
+  border-radius: 4px;
+  font-size: 14px;
+  z-index: 2000;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+  animation: slideUp 300ms ease;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.toast-success {
+  background: var(--color-success);
+  color: white;
+}
+
+.toast-error {
+  background: var(--color-error);
+  color: white;
+}
+
+/* Calendar Sidebar */
+.calendar-sidebar {
+  flex: 0 0 auto;
+  width: 420px;
+  min-width: 380px;
+  max-width: 600px;
+  border-left: 1px solid var(--color-border);
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0;
+  gap: 8px;
+  transition: width 300ms ease, border-left 300ms ease;
+  position: relative;
+}
+
+@media (min-width: 1920px) {
+  .calendar-sidebar {
+    width: 520px;
+    max-width: 720px;
+  }
+}
+
+@media (min-width: 2560px) {
+  .calendar-sidebar {
+    width: 640px;
+    max-width: 900px;
+  }
+}
+
+.calendar-sidebar.full-page {
+  width: 100%;
+  border-left: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 200;
+  background: #fff;
+  padding: 24px;
+  max-width: 100%;
+}
+
+.calendar-sidebar.full-page .calendar-body {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding-top: 24px;
+}
+
+.calendar-sidebar.full-page .calendar-event-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.gmail-main.hidden,
+.gmail-sidebar.hidden {
+  display: none;
+}
+
+.calendar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px 16px 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.calendar-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text);
+  flex: 1;
+}
+
+.calendar-error-bar {
+  padding: 8px 12px;
+  margin: 0 16px;
+  background: #fce8e6;
+  border-left: 3px solid var(--color-error);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--color-error);
+}
+
+.calendar-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.calendar-add-btn {
+  background: var(--compose-btn);
+  border: none;
+  border-radius: 16px;
+  padding: 6px 12px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 200ms;
+}
+
+.calendar-add-btn:hover {
+  background: var(--compose-btn-hover);
+}
+
+.calendar-icon-btn {
+  background: none;
+  border: none;
+  padding: 6px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 16px;
+  color: var(--color-text-secondary);
+  transition: background 100ms, color 100ms;
+}
+
+.calendar-icon-btn:hover:not(:disabled) {
+  background: var(--color-hover);
+  color: var(--color-text);
+}
+
+.calendar-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.calendar-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 16px;
+}
+
+.calendar-empty {
+  text-align: center;
+  color: var(--color-text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+  margin-top: 48px;
+}
+
+.calendar-empty span {
+  font-size: 32px;
+}
+
+.calendar-empty p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.calendar-empty button {
+  border: 1px solid var(--color-border);
+  background: #fff;
+  border-radius: 16px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 100ms;
+}
+
+.calendar-empty button:hover {
+  background: var(--color-hover);
+}
+
+.calendar-event-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.calendar-event-card {
+  background: #f8f9fa;
+  border-radius: 8px;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  transition: background 100ms, border-color 100ms;
+  cursor: pointer;
+}
+
+.calendar-event-card:hover {
+  background: var(--color-hover);
+  border-color: #dadce0;
+}
+
+.calendar-event-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.calendar-event-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.calendar-event-time,
+.calendar-event-location,
+.calendar-event-attendees {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.calendar-event-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.calendar-modal {
+  max-width: 520px;
+}
+
+.calendar-time-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.calendar-time-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.calendar-time-fields input {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 13px;
+}
+
+.calendar-description textarea {
+  min-height: 120px;
+}
+
+.signature-badge {
+  margin-left: 6px;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+.signature-badge.signature-valid {
+  color: var(--color-success);
+}
+
+.signature-badge.signature-invalid {
+  color: var(--color-error);
+}
+
+.signature-badge.signature-unsigned {
+  color: var(--color-text-secondary);
+}
+
+.sender-email.cc-line {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+/* Responsive */
+@media (max-width: 1400px) {
+  .calendar-sidebar {
+    width: 360px;
+    min-width: 320px;
+    max-width: 440px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .gmail-viewer.open {
+    flex: 0 1 50%;
+    min-width: 400px;
+    max-width: 600px;
+  }
+
+  .calendar-sidebar {
+    width: 320px;
+    min-width: 280px;
+    max-width: 380px;
+  }
+}
+
+@media (max-width: 768px) {
+  .gmail-sidebar {
+    width: 200px;
+  }
+
+  .gmail-viewer.open {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    flex: 1;
+    min-width: 100%;
+    max-width: 100%;
+    z-index: 100;
+  }
+
+  .calendar-sidebar {
+    display: none;
+  }
+
+  .header-center {
+    display: none;
+  }
+
+  .user-info {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .gmail-sidebar {
+    display: none;
+  }
+
+  .email-item {
+    grid-template-columns: 30px 1fr 80px;
+  }
+
+  .email-checkbox {
+    display: none;
+  }
+
+  .email-sender {
+    display: none;
+  }
+}
