@@ -41,7 +41,9 @@ import { clearIdentityCache, getOrCreateIdentityCached } from './utils/identityC
 
 const IDENTITY_REGISTRATION_CACHE_KEY = 'dmail_registered_identity_cache'
 const OUTBOX_STORAGE_PREFIX = 'dmail:outbox:'
+const OUTBOX_LOCK_PREFIX = 'dmail:outbox-lock:'
 const OUTBOX_POLL_INTERVAL_MS = 5000
+const OUTBOX_LOCK_TTL_MS = 10_000
 
 const safeJsonParse = (value, fallback) => {
   try {
@@ -54,6 +56,11 @@ const safeJsonParse = (value, fallback) => {
 const getOutboxStorageKey = (address) => {
   if (!address) return null
   return `${OUTBOX_STORAGE_PREFIX}${address.toLowerCase()}`
+}
+
+const getOutboxLockKey = (address) => {
+  if (!address) return null
+  return `${OUTBOX_LOCK_PREFIX}${address.toLowerCase()}`
 }
 
 const loadOutboxFromStorage = (address) => {
@@ -139,6 +146,9 @@ function App() {
   const [selectedEmails, setSelectedEmails] = useState([]) // Track selected emails for deletion
   const [outboxItems, setOutboxItems] = useState([])
   const outboxProcessingRef = useRef(false)
+  const outboxLockOwnerRef = useRef(
+    typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `tab-${Date.now()}-${Math.random()}`
+  )
   const manualDisconnectRef = useRef(false) // Track manual disconnect to prevent auto-reconnect
   
   // Keep ref in sync with state
@@ -194,6 +204,71 @@ function App() {
     [updateOutboxState]
   )
 
+  const tryAcquireOutboxLock = useCallback(() => {
+    if (typeof window === 'undefined' || !walletAddress) {
+      return false
+    }
+    const key = getOutboxLockKey(walletAddress)
+    if (!key) return false
+    const now = Date.now()
+    try {
+      const raw = window.localStorage.getItem(key)
+      if (raw) {
+        const parsed = safeJsonParse(raw, null)
+        if (parsed?.timestamp && now - parsed.timestamp < OUTBOX_LOCK_TTL_MS) {
+          return false
+        }
+      }
+      window.localStorage.setItem(
+        key,
+        JSON.stringify({
+          owner: outboxLockOwnerRef.current,
+          timestamp: now,
+        })
+      )
+      return true
+    } catch (error) {
+      console.warn('[outbox] Failed to acquire lock', error)
+      return false
+    }
+  }, [walletAddress])
+
+  const refreshOutboxLock = useCallback(() => {
+    if (typeof window === 'undefined' || !walletAddress) return
+    const key = getOutboxLockKey(walletAddress)
+    if (!key) return
+    try {
+      window.localStorage.setItem(
+        key,
+        JSON.stringify({
+          owner: outboxLockOwnerRef.current,
+          timestamp: Date.now(),
+        })
+      )
+    } catch (error) {
+      console.warn('[outbox] Failed to refresh lock', error)
+    }
+  }, [walletAddress])
+
+  const releaseOutboxLock = useCallback(() => {
+    if (typeof window === 'undefined' || !walletAddress) {
+      return
+    }
+    const key = getOutboxLockKey(walletAddress)
+    if (!key) return
+    try {
+      const raw = window.localStorage.getItem(key)
+      if (raw) {
+        const parsed = safeJsonParse(raw, null)
+        if (!parsed || parsed.owner === outboxLockOwnerRef.current) {
+          window.localStorage.removeItem(key)
+        }
+      }
+    } catch (error) {
+      console.warn('[outbox] Failed to release lock', error)
+    }
+  }, [walletAddress])
+
   const patchOutboxItem = useCallback(
     (id, updates) => {
       if (!id) return
@@ -213,6 +288,8 @@ function App() {
     },
     [updateOutboxState]
   )
+  const requestOutboxProcessingRef = useRef(() => {})
+
   
   // Keep calendar upload result ref in sync with state
   useEffect(() => {
@@ -227,21 +304,6 @@ function App() {
     const stored = loadOutboxFromStorage(walletAddress)
     setOutboxItems(Array.isArray(stored) ? stored : [])
   }, [walletAddress])
-
-  useEffect(() => {
-    if (!walletAddress) return
-    if ((outboxItems ?? []).some((item) => item.status === 'pending')) {
-      requestOutboxProcessing()
-    }
-  }, [walletAddress, outboxItems, requestOutboxProcessing])
-
-  useEffect(() => {
-    if (!walletAddress) return undefined
-    const interval = setInterval(() => {
-      processOutboxQueue()
-    }, OUTBOX_POLL_INTERVAL_MS)
-    return () => clearInterval(interval)
-  }, [walletAddress, processOutboxQueue])
 
   const evaluateEntrySignature = useCallback(
     (entry) => {
@@ -1357,27 +1419,18 @@ function App() {
           throw new Error('Identity signing material missing. Reconnect wallet to derive identity again.')
         }
 
-        console.log('[sendEmail] Sender ENS:', senderEns)
-        console.log('[sendEmail] Recipient input:', recipientInput)
-        console.log('[sendEmail] Is self-recipient?', isSelfRecipient, { normalizedSenderEns, normalizedRecipientEns })
-        console.log('[sendEmail] Active identity publicKey:', activeIdentity.publicKey?.substring(0, 30) + '...')
-
         let recipientPublicKey = null
         if (isSelfRecipient) {
           recipientPublicKey = activeIdentity.publicKey
-          console.log('[sendEmail] ✓ Sending to self, using derived identity key (v2 X25519):', recipientPublicKey?.substring(0, 30) + '...')
         } else if (composeState.recipientPublicKey?.trim()) {
           recipientPublicKey = composeState.recipientPublicKey.trim()
-          console.log('[sendEmail] Using manually entered public key from compose form:', recipientPublicKey?.substring(0, 30) + '...')
         } else {
-          console.log('[sendEmail] Resolving public key for recipient:', recipientEns)
           recipientPublicKey =
             (await resolvePublicKey(recipientEns, {
               provider: ensProvider,
               ensName: recipientEns,
               disableEnsFallback: true,
             })) || import.meta.env.VITE_RECIPIENT_PUBLIC_KEY
-          console.log('[sendEmail] Resolved public key:', recipientPublicKey?.substring(0, 30) + '...')
         }
 
         if (!recipientPublicKey) {
@@ -1392,13 +1445,6 @@ function App() {
           (/^0x[0-9a-fA-F]+$/.test(normalizedRecipientKey) ||
             (/^[0-9a-fA-F]+$/.test(normalizedRecipientKey) &&
               normalizedRecipientKey.length >= 66))
-
-        console.log('[sendEmail] Recipient key validation:', {
-          key: normalizedRecipientKey.substring(0, 30) + '...',
-          looksLikeLegacyKey,
-          startsWithHex: normalizedRecipientKey.startsWith('0x'),
-          length: normalizedRecipientKey.length,
-        })
 
         if (looksLikeLegacyKey) {
           throw new Error(
@@ -1464,7 +1510,7 @@ function App() {
         setShowManualPubKey(false)
         setFetchingPubKey(false)
         setShowCompose(false)
-        requestOutboxProcessing()
+        requestOutboxProcessingRef.current()
       } catch (error) {
         console.error(error)
         setErrorMessage(error.message ?? 'Failed to send email')
@@ -1483,7 +1529,7 @@ function App() {
       ensureProvider,
       ensName,
       getEnsProvider,
-      requestOutboxProcessing,
+      requestOutboxProcessingRef,
       walletAddress,
     ]
   )
@@ -1493,6 +1539,11 @@ function App() {
       if (!item) {
         throw new Error('Outbox item missing')
       }
+      console.log('[outbox] Starting delivery for queued email', {
+        id: item.id,
+        messageId: item.metadata?.messageId,
+        to: item.recipientEns,
+      })
       const browserProvider = await ensureProvider()
       const signer = await browserProvider.getSigner()
       const ensProvider = await getEnsProvider()
@@ -1544,6 +1595,11 @@ function App() {
       const uploads = await Promise.all(uploadPromises)
       const recipientUpload = uploads[0]
       const senderUpload = uploads[1] || null
+      console.log('[outbox] Uploaded encrypted envelopes', {
+        id: item.id,
+        recipientCid: recipientUpload?.cid,
+        senderCid: senderUpload?.cid,
+      })
 
       const recipientMailboxRootRaw = await resolveMailboxRoot(recipientEns, {
         provider: ensProvider,
@@ -1672,6 +1728,11 @@ function App() {
       }
 
       mailboxRootRef.current = senderMailboxUpdate.mailboxRoot
+      console.log('[outbox] Appended mailbox entries on ENS resolver', {
+        id: item.id,
+        inboxCid: recipientMailboxUpdate?.uploadResult?.cid,
+        sentCid: senderMailboxUpdate?.uploadResult?.cid,
+      })
 
       return {
         senderEntry: senderMailboxUpdate.entry,
@@ -1692,21 +1753,38 @@ function App() {
     if (!walletAddress || outboxProcessingRef.current) {
       return
     }
+    if (!tryAcquireOutboxLock()) {
+      return
+    }
     const storedItems = loadOutboxFromStorage(walletAddress)
     if (!storedItems || storedItems.length === 0) {
+      releaseOutboxLock()
       return
     }
     const nextItem = storedItems.find(
       (item) => item.status === 'pending' || item.status === 'error'
     )
     if (!nextItem) {
+      releaseOutboxLock()
       return
     }
     outboxProcessingRef.current = true
     patchOutboxItem(nextItem.id, { status: 'sending', errorMessage: null })
+    refreshOutboxLock()
     try {
+      console.log('[outbox] Processing queued email', {
+        id: nextItem.id,
+        messageId: nextItem.metadata?.messageId,
+        to: nextItem.recipientEns,
+      })
+      setStatusMessage('Uploading queued email to Filecoin storage...')
       const result = await deliverOutboxItem(nextItem)
       removeOutboxItem(nextItem.id)
+      console.log('[outbox] ✓ Delivered queued email', {
+        id: nextItem.id,
+        messageId: result?.senderEntry?.messageId ?? nextItem.metadata?.messageId,
+        to: nextItem.recipientEns,
+      })
       if (result?.senderEntry) {
         setSentEntries((prev) => {
           const filtered = (prev ?? []).filter(
@@ -1726,6 +1804,7 @@ function App() {
       if (result?.mailboxRoot) {
         setMailboxRoot(result.mailboxRoot)
       }
+      setStatusMessage('Queued email delivered successfully')
     } catch (error) {
       console.error('[outbox] Failed to deliver queued email:', error)
       patchOutboxItem(nextItem.id, {
@@ -1733,9 +1812,21 @@ function App() {
         errorMessage: error.message ?? 'Failed to send message',
       })
     } finally {
+      releaseOutboxLock()
       outboxProcessingRef.current = false
     }
-  }, [deliverOutboxItem, patchOutboxItem, removeOutboxItem, setMailboxEntries, setMailboxRoot, setSentEntries, walletAddress])
+  }, [
+    deliverOutboxItem,
+    patchOutboxItem,
+    refreshOutboxLock,
+    releaseOutboxLock,
+    removeOutboxItem,
+    setMailboxEntries,
+    setMailboxRoot,
+    setSentEntries,
+    tryAcquireOutboxLock,
+    walletAddress,
+  ])
 
   const requestOutboxProcessing = useCallback(() => {
     setTimeout(() => {
@@ -1743,13 +1834,47 @@ function App() {
     }, 50)
   }, [processOutboxQueue])
 
+  useEffect(() => {
+    requestOutboxProcessingRef.current = requestOutboxProcessing
+  }, [requestOutboxProcessing])
+  // Setup outbox processing effects after functions are defined
+  useEffect(() => {
+    if (!walletAddress) return
+    if ((outboxItems ?? []).some((item) => item.status === 'pending')) {
+      requestOutboxProcessingRef.current()
+    }
+  }, [walletAddress, outboxItems])
+
+  useEffect(() => {
+    if (!walletAddress) return undefined
+    const interval = setInterval(() => {
+      processOutboxQueue()
+    }, OUTBOX_POLL_INTERVAL_MS)
+    return () => clearInterval(interval)
+  }, [walletAddress, processOutboxQueue])
+
+  useEffect(() => {
+    return () => {
+      releaseOutboxLock()
+    }
+  }, [releaseOutboxLock])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const handler = () => requestOutboxProcessingRef.current()
+    window.addEventListener('online', handler)
+    return () => {
+      window.removeEventListener('online', handler)
+    }
+  }, [])
+
   const handleRetryOutboxItem = useCallback(
     (id) => {
       if (!id) return
       patchOutboxItem(id, { status: 'pending', errorMessage: null })
-      requestOutboxProcessing()
+      requestOutboxProcessingRef.current()
     },
-    [patchOutboxItem, requestOutboxProcessing]
+    [patchOutboxItem]
   )
   const getOutboxStatusLabel = useCallback((status) => {
     switch (status) {
