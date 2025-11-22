@@ -15,11 +15,13 @@ import {
   loadCalendarFromCid as loadCalendarFromCidFile,
   persistCalendar,
   setMailboxUploadResult,
+  setMailboxRootToEns,
   getCalendarUploadResult,
   setCalendarUploadResult,
   generateCalendarIcs,
   resolvePublicKey,
   resolveMailboxRoot,
+  updateResolverMailboxRoot,
   normalizeMailboxRoot,
   getMailboxIndexPointer,
   signEnvelope,
@@ -93,6 +95,7 @@ function App() {
   const mailboxRootRef = useRef(null)
   const [mailboxEntries, setMailboxEntries] = useState([])
   const [sentEntries, setSentEntries] = useState([])
+  const [selectedEmails, setSelectedEmails] = useState([]) // Track selected emails for deletion
   const manualDisconnectRef = useRef(false) // Track manual disconnect to prevent auto-reconnect
   
   // Keep ref in sync with state
@@ -609,15 +612,20 @@ function App() {
         ensName ?? (walletAddress ? await ensProvider.lookupAddress(walletAddress) : null)
       const ownerIdentifier = targetEns ?? walletAddress
       
-      // Fetch mailbox root from ENS
+      // Fetch mailbox root from resolver (with ENS fallback)
+      console.log('[refreshInbox] Fetching mailbox root for:', ownerIdentifier)
       const mailboxRootResponse = await resolveMailboxRoot(ownerIdentifier, {
         provider: ensProvider,
       })
+      console.log('[refreshInbox] Raw mailbox root response:', mailboxRootResponse)
+      
       const normalizedRoot = normalizeMailboxRoot(mailboxRootResponse, { owner: ownerIdentifier })
       
-      console.log('[refreshInbox] Fetched mailbox root from ENS:', {
+      console.log('[refreshInbox] Normalized mailbox root:', {
         owner: ownerIdentifier,
         normalizedRoot,
+        hasInbox: !!normalizedRoot?.inbox,
+        hasSent: !!normalizedRoot?.sent,
       })
       
       setMailboxRoot(normalizedRoot)
@@ -979,6 +987,166 @@ function App() {
     }
   }, [selectedEmail])
 
+  // Toggle email selection for deletion
+  const toggleEmailSelection = useCallback((entry) => {
+    const entryKey = entry.messageId ?? entry.cid
+    setSelectedEmails((prev) => {
+      const isSelected = prev.some((e) => (e.messageId ?? e.cid) === entryKey)
+      if (isSelected) {
+        return prev.filter((e) => (e.messageId ?? e.cid) !== entryKey)
+      } else {
+        return [...prev, entry]
+      }
+    })
+  }, [])
+  
+  // Select/deselect all emails
+  const toggleSelectAll = useCallback(() => {
+    const source = activeView === 'sent' ? sentEntries : mailboxEntries
+    const sorted = [...source].sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+    let emails = sorted
+    if (searchQuery) {
+      const query = searchQuery.toLowerCase()
+      emails = sorted.filter(
+        (entry) =>
+          entry.from?.toLowerCase().includes(query) ||
+          (Array.isArray(entry.toRecipients)
+            ? entry.toRecipients.join(', ').toLowerCase().includes(query)
+            : entry.to?.toLowerCase().includes(query)) ||
+          entry.subjectPreview?.toLowerCase().includes(query)
+      )
+    }
+    
+    if (selectedEmails.length === emails.length) {
+      setSelectedEmails([])
+    } else {
+      setSelectedEmails([...emails])
+    }
+  }, [selectedEmails.length, activeView, sentEntries, mailboxEntries, searchQuery])
+  
+  // Delete selected emails
+  const handleDeleteSelected = useCallback(async () => {
+    if (selectedEmails.length === 0) {
+      setErrorMessage('No emails selected')
+      return
+    }
+    
+    const confirmDelete = window.confirm(
+      `Are you sure you want to delete ${selectedEmails.length} email(s)? This action cannot be undone.`
+    )
+    if (!confirmDelete) return
+    
+    try {
+      setStatusMessage(`Deleting ${selectedEmails.length} email(s)...`)
+      const browserProvider = await ensureProvider()
+      const signer = await browserProvider.getSigner()
+      const ensProvider = await getEnsProvider()
+      const senderEns = ensName ?? (walletAddress ? await ensProvider.lookupAddress(walletAddress) : null)
+      
+      if (!senderEns) {
+        throw new Error('ENS name not resolved. Connect wallet first.')
+      }
+      
+      const selectedKeys = selectedEmails.map(e => e.messageId ?? e.cid)
+      
+      // Filter out deleted emails from current entries
+      const newInboxEntries = activeView === 'inbox' 
+        ? mailboxEntries.filter(e => !selectedKeys.includes(e.messageId ?? e.cid))
+        : mailboxEntries
+      const newSentEntries = activeView === 'sent'
+        ? sentEntries.filter(e => !selectedKeys.includes(e.messageId ?? e.cid))
+        : sentEntries
+      
+      // Update local state immediately (optimistic update)
+      setMailboxEntries(newInboxEntries)
+      setSentEntries(newSentEntries)
+      setSelectedEmails([])
+      setSelectedEmail(null)
+      
+      // Create new mailbox with remaining emails and upload to ENS
+      const currentMailboxRoot = mailboxRootRef.current || { owner: senderEns, version: 2, inbox: null, sent: null }
+      const updatedMailboxRoot = { ...currentMailboxRoot }
+      
+      setStatusMessage('Updating mailbox on ENS...')
+      
+      // Upload updated inbox if deleting from inbox
+      if (activeView === 'inbox') {
+        const inboxMailbox = {
+          owner: senderEns,
+          type: 'inbox',
+          version: 2,
+          updatedAt: new Date().toISOString(),
+          entries: newInboxEntries,
+          emails: newInboxEntries,
+        }
+        const inboxUploadResult = await synapseUpload(JSON.stringify(inboxMailbox, null, 2), {
+          filename: 'inbox.json',
+          metadata: {
+            type: 'dmail-mailbox-inbox',
+            owner: senderEns,
+          },
+        })
+        updatedMailboxRoot.inbox = inboxUploadResult
+      }
+      
+      // Upload updated sent if deleting from sent
+      if (activeView === 'sent') {
+        const sentMailbox = {
+          owner: senderEns,
+          type: 'sent',
+          version: 2,
+          updatedAt: new Date().toISOString(),
+          entries: newSentEntries,
+          emails: newSentEntries,
+        }
+        const sentUploadResult = await synapseUpload(JSON.stringify(sentMailbox, null, 2), {
+          filename: 'sent.json',
+          metadata: {
+            type: 'dmail-mailbox-sent',
+            owner: senderEns,
+          },
+        })
+        updatedMailboxRoot.sent = sentUploadResult
+      }
+      
+      setMailboxRoot(updatedMailboxRoot)
+      
+      // Update offchain resolver with full mailbox root (includes both inbox and sent pointers)
+      try {
+        await updateResolverMailboxRoot(senderEns, updatedMailboxRoot)
+        console.log('[handleDeleteSelected] Updated offchain resolver with mailbox root')
+      } catch (resolverError) {
+        console.warn('[handleDeleteSelected] Failed to update offchain resolver:', resolverError)
+      }
+      
+      // Update ENS with both inbox and sent pointers
+      try {
+        await setMailboxRootToEns(senderEns, updatedMailboxRoot, {
+          provider: browserProvider,
+          signer,
+          wait: false, // Don't wait for blockchain confirmation
+        })
+        console.log('[handleDeleteSelected] Updated ENS with mailbox root:', {
+          inboxCid: updatedMailboxRoot?.inbox?.cid,
+          sentCid: updatedMailboxRoot?.sent?.cid,
+        })
+      } catch (ensError) {
+        console.warn('[handleDeleteSelected] Failed to update ENS:', ensError)
+      }
+      
+      const count = activeView === 'sent' ? newSentEntries.length : newInboxEntries.length
+      setStatusMessage(`Deleted ${selectedEmails.length} email(s). Refreshing...`)
+      
+      // Refresh to ensure UI is in sync with resolver/ENS
+      await refreshInbox()
+    } catch (error) {
+      console.error('Failed to delete emails:', error)
+      setErrorMessage(error.message ?? 'Failed to delete emails')
+      // Revert optimistic update on error
+      await refreshInbox()
+    }
+  }, [selectedEmails, activeView, mailboxEntries, sentEntries, ensName, walletAddress, ensureProvider, getEnsProvider, mailboxRootRef, refreshInbox])
+
   const handleSaveEvent = useCallback(
     async (eventInput) => {
       setSavingEvent(true)
@@ -1282,26 +1450,20 @@ function App() {
         })
 
         // Update ENS mailbox pointer for the connected account to ensure refresh uses the new CID
-        const senderInboxPointer =
-          getMailboxIndexPointer(senderMailboxUpdate.mailboxRoot, 'inbox') ??
-          getMailboxIndexPointer(recipientMailboxUpdate.mailboxRoot, 'inbox') ??
-          recipientMailboxUpdate.uploadResult
-
-        if (senderInboxPointer?.cid) {
-          try {
-            await setMailboxUploadResult(senderEns, senderInboxPointer, {
-              provider: browserProvider,
-              signer,
-              wait: true,
-            })
-            console.log('[sendEmail] Updated ENS mailbox pointer:', senderInboxPointer.cid)
-          } catch (ensUpdateError) {
-            console.warn('[sendEmail] Failed to update ENS mailbox pointer:', ensUpdateError)
-          }
-        } else {
-          console.warn('[sendEmail] No inbox pointer available to persist on ENS', {
-            senderMailboxRoot: senderMailboxUpdate.mailboxRoot,
+        // Use setMailboxRootToEns to update BOTH inbox and sent pointers
+        try {
+          setStatusMessage('Updating ENS text records (inbox + sent)...')
+          await setMailboxRootToEns(senderEns, senderMailboxUpdate.mailboxRoot, {
+            provider: browserProvider,
+            signer,
+            wait: true,
           })
+          console.log('[sendEmail] ✓ Updated ENS with full mailbox root:', {
+            inboxCid: senderMailboxUpdate.mailboxRoot?.inbox?.cid,
+            sentCid: senderMailboxUpdate.mailboxRoot?.sent?.cid,
+          })
+        } catch (ensUpdateError) {
+          console.warn('[sendEmail] Failed to update ENS mailbox pointers:', ensUpdateError)
         }
 
         setStatusMessage('Email sent successfully! Refreshing inbox...')
@@ -1456,7 +1618,10 @@ function App() {
           <nav className="sidebar-nav">
             <button
               className={activeView === 'inbox' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setActiveView('inbox')}
+              onClick={() => {
+                setActiveView('inbox')
+                setSelectedEmails([])
+              }}
             >
               <span className="nav-icon">📥</span>
               <span className="nav-label">Inbox</span>
@@ -1468,7 +1633,10 @@ function App() {
             </button>
             <button
               className={activeView === 'sent' ? 'nav-item active' : 'nav-item'}
-              onClick={() => setActiveView('sent')}
+              onClick={() => {
+                setActiveView('sent')
+                setSelectedEmails([])
+              }}
             >
               <span className="nav-icon">📤</span>
               <span className="nav-label">Sent</span>
@@ -1523,10 +1691,25 @@ function App() {
         <main className={`gmail-main ${calendarFullPage ? 'hidden' : ''}`}>
           <div className="toolbar">
             <div className="toolbar-left">
-              <input type="checkbox" className="select-all" />
+              <input 
+                type="checkbox" 
+                className="select-all" 
+                checked={selectedEmails.length > 0 && selectedEmails.length === filteredEmails.length}
+                onChange={toggleSelectAll}
+                title="Select/Deselect all"
+              />
               <button className="toolbar-btn" title="Refresh" onClick={refreshInbox}>
                 ↻
               </button>
+              {selectedEmails.length > 0 && (
+                <button 
+                  className="toolbar-btn delete-btn" 
+                  title={`Delete ${selectedEmails.length} email(s)`} 
+                  onClick={handleDeleteSelected}
+                >
+                  🗑️ Delete ({selectedEmails.length})
+                </button>
+              )}
             </div>
           </div>
 
@@ -1547,13 +1730,20 @@ function App() {
                 const isActive = selectedEmail?.entry?.messageId
                   ? selectedEmail.entry.messageId === entry.messageId
                   : selectedEmail?.entry?.cid === entry.cid
+                const isSelected = selectedEmails.some(e => (e.messageId ?? e.cid) === (entry.messageId ?? entry.cid))
                 return (
                   <div
                     key={entryKey}
-                    className={`email-item ${isActive ? 'active' : ''}`}
+                    className={`email-item ${isActive ? 'active' : ''} ${isSelected ? 'selected' : ''}`}
                     onClick={() => openEmail(entry)}
                   >
-                    <input type="checkbox" className="email-checkbox" onClick={(e) => e.stopPropagation()} />
+                    <input 
+                      type="checkbox" 
+                      className="email-checkbox" 
+                      checked={isSelected}
+                      onChange={() => toggleEmailSelection(entry)}
+                      onClick={(e) => e.stopPropagation()} 
+                    />
                     <span className="email-star">☆</span>
                     <span className="email-sender">{entry.from || 'Unknown'}</span>
                     <span className="email-subject">

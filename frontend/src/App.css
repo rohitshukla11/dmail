@@ -433,6 +433,26 @@ body {
   background: var(--color-hover);
 }
 
+.delete-btn {
+  background: #ff4444;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.delete-btn:hover {
+  background: #cc0000;
+}
+
+.email-item.selected {
+  background: #e3f2fd;
+}
+
 .email-list {
   flex: 1 1 auto;
   overflow-y: auto;

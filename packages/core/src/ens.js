@@ -2,6 +2,7 @@ import { BrowserProvider, JsonRpcProvider, Wallet, Contract, namehash } from 'et
 import { normalizeServiceUrl, getStorageServiceUrl } from './synapse.js'
 
 const MAILBOX_KEY = 'dmail:mailbox'
+const MAILBOX_SENT_KEY = 'dmail:mailbox:sent'
 const CALENDAR_KEY = 'dmail:calendar'
 const PUBKEY_KEY = 'dmail:pubkey'
 
@@ -56,6 +57,40 @@ export async function getMailboxUploadResult(ensName, options = {}) {
     // Legacy format: just CID string, return as object for backward compatibility
     // Note: This won't work with new Synapse-only retrieval, but allows migration
     return { cid: value }
+  }
+}
+
+// Get full mailbox root with both inbox and sent pointers from ENS
+export async function getMailboxRootFromEns(ensName, options = {}) {
+  if (!ensName) {
+    throw new Error('getMailboxRootFromEns: ensName is required')
+  }
+  const provider = options.provider ?? createDefaultProvider()
+  const resolver = await provider.getResolver(ensName)
+  if (!resolver) return null
+  
+  // Fetch both inbox and sent pointers in parallel
+  const [inboxValue, sentValue] = await Promise.all([
+    resolver.getText(MAILBOX_KEY),
+    resolver.getText(MAILBOX_SENT_KEY)
+  ])
+  
+  if (!inboxValue && !sentValue) return null
+  
+  const parsePointer = (value) => {
+    if (!value) return null
+    try {
+      return JSON.parse(value)
+    } catch {
+      return { cid: value }
+    }
+  }
+  
+  return {
+    owner: ensName,
+    version: 2,
+    inbox: parsePointer(inboxValue),
+    sent: parsePointer(sentValue),
   }
 }
 
@@ -137,6 +172,70 @@ export async function setMailboxCid(ensName, cid, options = {}) {
   // Legacy: if only CID provided, we can't use it with Synapse-only retrieval
   // This will fail if used, but kept for API compatibility
   throw new Error('setMailboxCid is deprecated. Use setMailboxUploadResult with full upload result including provider info.')
+}
+
+// Set full mailbox root with both inbox and sent pointers to ENS
+export async function setMailboxRootToEns(ensName, mailboxRoot, options = {}) {
+  if (!ensName) {
+    throw new Error('setMailboxRootToEns: ensName is required')
+  }
+  if (!mailboxRoot) {
+    throw new Error('setMailboxRootToEns: mailboxRoot is required')
+  }
+
+  const provider = options.provider ?? createDefaultProvider(options.providerOverride)
+  const signer = await resolveSigner(provider, options.signer, options.privateKey)
+
+  const resolver = await provider.getResolver(ensName)
+  if (!resolver) {
+    throw new Error(`setMailboxRootToEns: Resolver not configured for ${ensName}`)
+  }
+
+  const resolverAddress = resolver?.address ?? resolver?.target
+  if (!resolverAddress) {
+    throw new Error('setMailboxRootToEns: Resolver address unavailable')
+  }
+
+  const resolverContract = new Contract(
+    resolverAddress,
+    ['function setText(bytes32 node, string key, string value) external'],
+    signer
+  )
+  
+  const serializePointer = (pointer) => {
+    if (!pointer) return ''
+    const storageInfo = {
+      cid: pointer.cid,
+      pieceCid: pointer.pieceCid,
+      providerId: pointer.providerInfo?.id,
+      providerAddress: pointer.providerInfo?.address,
+      serviceURL: normalizeServiceUrl(getStorageServiceUrl(pointer.providerInfo)),
+    }
+    return JSON.stringify(storageInfo)
+  }
+
+  const node = namehash(ensName)
+  const txs = []
+  
+  // Set inbox pointer if provided
+  if (mailboxRoot.inbox) {
+    const inboxValue = serializePointer(mailboxRoot.inbox)
+    const tx = await resolverContract.setText(node, MAILBOX_KEY, inboxValue)
+    txs.push(tx)
+  }
+  
+  // Set sent pointer if provided
+  if (mailboxRoot.sent) {
+    const sentValue = serializePointer(mailboxRoot.sent)
+    const tx = await resolverContract.setText(node, MAILBOX_SENT_KEY, sentValue)
+    txs.push(tx)
+  }
+  
+  if (options.wait !== false) {
+    await Promise.all(txs.map(tx => tx.wait()))
+  }
+  
+  return txs
 }
 
 export async function setCalendarUploadResult(ensName, uploadResult, options = {}) {

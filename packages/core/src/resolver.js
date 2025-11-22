@@ -1,4 +1,4 @@
-import { fetchPublicKeyFromEns, getMailboxUploadResult as getMailboxUploadResultFromEns } from './ens.js'
+import { fetchPublicKeyFromEns, getMailboxRootFromEns } from './ens.js'
 
 const isBrowser = typeof window !== 'undefined'
 const MISSING_PROFILE = Symbol('resolver-profile-missing')
@@ -194,7 +194,8 @@ export async function resolveMailboxRoot(identifier, options = {}) {
   if (options.disableEnsFallback) {
     return null
   }
-  return await getMailboxUploadResultFromEns(identifier, options)
+  // Fallback to ENS - now fetches both inbox AND sent pointers
+  return await getMailboxRootFromEns(identifier, options)
 }
 
 export async function updateResolverMailboxRoot(identifier, mailboxRoot, options = {}) {
