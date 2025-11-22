@@ -449,6 +449,22 @@ body {
   background: #cc0000;
 }
 
+.warning-btn {
+  background: #fde68a;
+  color: #92400e;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.warning-btn:hover {
+  background: #fcd34d;
+}
+
 .email-item.selected {
   background: #e3f2fd;
 }

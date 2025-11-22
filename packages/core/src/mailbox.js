@@ -92,9 +92,30 @@ function ensureProviderInfo(uploadResult) {
   return null
 }
 
+function sanitizeForJson(value) {
+  if (typeof value === 'bigint') {
+    return value.toString()
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForJson(item))
+  }
+  if (value && typeof value === 'object') {
+    const next = {}
+    for (const [key, val] of Object.entries(value)) {
+      if (typeof val === 'undefined') continue
+      next[key] = sanitizeForJson(val)
+    }
+    return next
+  }
+  return value
+}
+
 function cloneUploadResult(uploadResult) {
   if (!uploadResult) return null
-  return JSON.parse(JSON.stringify(uploadResult))
+  const serialized = JSON.stringify(uploadResult, (_, val) =>
+    typeof val === 'bigint' ? val.toString() : val
+  )
+  return JSON.parse(serialized)
 }
 
 function ensureArray(value) {
@@ -147,7 +168,7 @@ function buildSegmentPointerFromUpload(uploadResult, segmentDoc) {
     id: segmentDoc.segmentId,
     cid: uploadResult.cid,
     pieceCid: uploadResult.pieceCid,
-    providerInfo: ensureProviderInfo(uploadResult),
+    providerInfo: sanitizeForJson(ensureProviderInfo(uploadResult)),
     entryCount: getSegmentEntries(segmentDoc).length,
     updatedAt: new Date().toISOString(),
   }
@@ -209,7 +230,7 @@ async function loadMailboxRootDocument(pointer, options = {}) {
 }
 
 async function persistMailboxRootDocument(rootDoc, options = {}) {
-  const payload = JSON.stringify(rootDoc, null, 2)
+  const payload = JSON.stringify(sanitizeForJson(rootDoc), null, 2)
   return synapseUploadImpl(payload, {
     filename: `${ROOT_FILENAME}.json`,
     metadata: {
@@ -250,7 +271,7 @@ async function loadMailboxSegment(segmentPointer, options = {}) {
 }
 
 async function persistMailboxSegment(segmentDoc, options = {}) {
-  const payload = JSON.stringify(segmentDoc, null, 2)
+  const payload = JSON.stringify(sanitizeForJson(segmentDoc), null, 2)
   return synapseUploadImpl(payload, {
     filename: `${SEGMENT_FILENAME_PREFIX}-${segmentDoc.type}-${segmentDoc.segmentId}.json`,
     metadata: {
@@ -452,13 +473,20 @@ async function appendEntriesToSegments({
     }
   }
 
-  const segmentUploads = []
-  for (const state of dirtySegments.values()) {
-    const uploadResult = await persistMailboxSegment(state.doc, {
-      owner: ownerEns,
-      type,
-      ...(persistOptions ?? {}),
+  const dirtyStates = Array.from(dirtySegments.values())
+  const segmentUploadResults = await Promise.all(
+    dirtyStates.map(async (state) => {
+      const uploadResult = await persistMailboxSegment(state.doc, {
+        owner: ownerEns,
+        type,
+        ...(persistOptions ?? {}),
+      })
+      return { state, uploadResult }
     })
+  )
+
+  const segmentUploads = []
+  for (const { state, uploadResult } of segmentUploadResults) {
     const pointer = segments[state.pointerIndex]
     pointer.cid = uploadResult.cid
     pointer.pieceCid = uploadResult.pieceCid

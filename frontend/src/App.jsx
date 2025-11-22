@@ -45,6 +45,17 @@ const OUTBOX_LOCK_PREFIX = 'dmail:outbox-lock:'
 const OUTBOX_POLL_INTERVAL_MS = 5000
 const OUTBOX_LOCK_TTL_MS = 10_000
 
+const normalizeOutboxItem = (item) => {
+  if (!item || typeof item !== 'object') return null
+  const status = item.status === 'sending' || !item.status ? 'pending' : item.status
+  return {
+    ...item,
+    status,
+    metadata: item.metadata ?? {},
+    encryptedEnvelopes: item.encryptedEnvelopes ?? {},
+  }
+}
+
 const safeJsonParse = (value, fallback) => {
   try {
     return value ? JSON.parse(value) : fallback
@@ -67,7 +78,11 @@ const loadOutboxFromStorage = (address) => {
   if (typeof window === 'undefined') return []
   const key = getOutboxStorageKey(address)
   if (!key) return []
-  return safeJsonParse(window.localStorage.getItem(key), [])
+  const rawItems = safeJsonParse(window.localStorage.getItem(key), [])
+  if (!Array.isArray(rawItems)) return []
+  return rawItems
+    .map(normalizeOutboxItem)
+    .filter((item) => item && item.id && item.encryptedEnvelopes?.recipient)
 }
 
 const saveOutboxToStorage = (address, items) => {
@@ -75,6 +90,13 @@ const saveOutboxToStorage = (address, items) => {
   const key = getOutboxStorageKey(address)
   if (!key) return
   window.localStorage.setItem(key, JSON.stringify(items ?? []))
+}
+
+const clearOutboxStorage = (address) => {
+  if (typeof window === 'undefined') return
+  const key = getOutboxStorageKey(address)
+  if (!key) return
+  window.localStorage.removeItem(key)
 }
 
 function generateOutboxId() {
@@ -1554,127 +1576,129 @@ function App() {
       const folderGroups = new Map()
       const ownerContexts = new Map()
 
-      for (const item of items) {
-        const state = {
-          item,
-          senderEntry: null,
-          recipientEntry: null,
-          error: null,
-          senderEns: item.senderEns ?? primarySenderEns,
-          recipientEns: item.recipientEns,
-        }
-        itemStates.set(item.id, state)
-        try {
-          const senderEnsValue = state.senderEns
-          const recipientEnsValue = state.recipientEns
-          if (!senderEnsValue) {
-            throw new Error('Sender ENS not available. Reconnect wallet and try again.')
+      await Promise.all(
+        items.map(async (item) => {
+          const state = {
+            item,
+            senderEntry: null,
+            recipientEntry: null,
+            error: null,
+            senderEns: item.senderEns ?? primarySenderEns,
+            recipientEns: item.recipientEns,
           }
-          if (!recipientEnsValue) {
-            throw new Error('Outbox item missing recipient ENS.')
-          }
-          const recipientEnvelope = item.encryptedEnvelopes?.recipient
-          if (!recipientEnvelope) {
-            throw new Error('Outbox item missing recipient envelope payload.')
-          }
-          const uploadName = `${senderEnsValue}-${item.timestamp ?? Date.now()}`
-          const uploadPromises = [
-            synapseUpload(recipientEnvelope, {
-              filename: `email-${uploadName}.json`,
-              metadata: {
-                type: 'dmail-email-recipient',
-                messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
-              },
-            }),
-          ]
-          if (item.encryptedEnvelopes?.sender) {
-            uploadPromises.push(
-              synapseUpload(item.encryptedEnvelopes.sender, {
-                filename: `email-${uploadName}-sent.json`,
+          itemStates.set(item.id, state)
+          try {
+            const senderEnsValue = state.senderEns
+            const recipientEnsValue = state.recipientEns
+            if (!senderEnsValue) {
+              throw new Error('Sender ENS not available. Reconnect wallet and try again.')
+            }
+            if (!recipientEnsValue) {
+              throw new Error('Outbox item missing recipient ENS.')
+            }
+            const recipientEnvelope = item.encryptedEnvelopes?.recipient
+            if (!recipientEnvelope) {
+              throw new Error('Outbox item missing recipient envelope payload.')
+            }
+            const uploadName = `${senderEnsValue}-${item.timestamp ?? Date.now()}`
+            const uploadPromises = [
+              synapseUpload(recipientEnvelope, {
+                filename: `email-${uploadName}.json`,
                 metadata: {
-                  type: 'dmail-email-sender',
+                  type: 'dmail-email-recipient',
                   messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
                 },
-              })
-            )
-          }
-          const [recipientUpload, senderUpload] = await Promise.all(uploadPromises)
-          const toRecipients = item.metadata?.toRecipients ?? [recipientEnsValue]
-          const ccRecipients = item.metadata?.cc ?? []
-          const entryMetadataBase = {
-            from: senderEnsValue,
-            to: recipientEnsValue,
-            toRecipients,
-            cc: ccRecipients,
-            timestamp: item.timestamp,
-            subjectPreview: item.metadata?.subjectPreview ?? '(No subject)',
-            messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
-            attachments: item.metadata?.attachments ?? [],
-            ephemeralPublicKey: recipientEnvelope.ephemeralPublicKey ?? null,
-            signerPublicKey: activeIdentity.signingPublicKey,
-            bodyCid: recipientUpload?.cid ?? null,
-            keyEnvelopesCid: recipientUpload?.cid ?? null,
-            senderCopyCid: senderUpload?.cid ?? null,
-          }
+              }),
+            ]
+            if (item.encryptedEnvelopes?.sender) {
+              uploadPromises.push(
+                synapseUpload(item.encryptedEnvelopes.sender, {
+                  filename: `email-${uploadName}-sent.json`,
+                  metadata: {
+                    type: 'dmail-email-sender',
+                    messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
+                  },
+                })
+              )
+            }
+            const [recipientUpload, senderUpload] = await Promise.all(uploadPromises)
+            const toRecipients = item.metadata?.toRecipients ?? [recipientEnsValue]
+            const ccRecipients = item.metadata?.cc ?? []
+            const entryMetadataBase = {
+              from: senderEnsValue,
+              to: recipientEnsValue,
+              toRecipients,
+              cc: ccRecipients,
+              timestamp: item.timestamp,
+              subjectPreview: item.metadata?.subjectPreview ?? '(No subject)',
+              messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
+              attachments: item.metadata?.attachments ?? [],
+              ephemeralPublicKey: recipientEnvelope.ephemeralPublicKey ?? null,
+              signerPublicKey: activeIdentity.signingPublicKey,
+              bodyCid: recipientUpload?.cid ?? null,
+              keyEnvelopesCid: recipientUpload?.cid ?? null,
+              senderCopyCid: senderUpload?.cid ?? null,
+            }
 
-          if (!entryMetadataBase.bodyCid || !entryMetadataBase.keyEnvelopesCid) {
-            throw new Error('Failed to compute envelope metadata for this message.')
-          }
+            if (!entryMetadataBase.bodyCid || !entryMetadataBase.keyEnvelopesCid) {
+              throw new Error('Failed to compute envelope metadata for this message.')
+            }
 
-          const signatureMetadata = {
-            messageId: entryMetadataBase.messageId,
-            bodyCid: entryMetadataBase.bodyCid,
-            keyEnvelopesCid: entryMetadataBase.keyEnvelopesCid,
-            senderCopyCid: entryMetadataBase.senderCopyCid,
-            from: senderEnsValue,
-            to: toRecipients,
-            cc: ccRecipients,
-            timestamp: item.timestamp,
-            ephemeralPublicKey: entryMetadataBase.ephemeralPublicKey ?? null,
+            const signatureMetadata = {
+              messageId: entryMetadataBase.messageId,
+              bodyCid: entryMetadataBase.bodyCid,
+              keyEnvelopesCid: entryMetadataBase.keyEnvelopesCid,
+              senderCopyCid: entryMetadataBase.senderCopyCid,
+              from: senderEnsValue,
+              to: toRecipients,
+              cc: ccRecipients,
+              timestamp: item.timestamp,
+              ephemeralPublicKey: entryMetadataBase.ephemeralPublicKey ?? null,
+            }
+            const metadataHash = computeEnvelopeMetadataHash(signatureMetadata)
+            const signature = signEnvelope(activeIdentity.signingKey, metadataHash)
+            const entryMetadata = {
+              ...entryMetadataBase,
+              signature,
+            }
+            const uploadsPayload = { recipient: recipientUpload, sender: senderUpload }
+            const inboxKey = `${recipientEnsValue}:inbox`
+            if (!folderGroups.has(inboxKey)) {
+              folderGroups.set(inboxKey, { ownerEns: recipientEnsValue, type: 'inbox', items: [] })
+            }
+            folderGroups.get(inboxKey).items.push({
+              ownerEns: recipientEnsValue,
+              type: 'inbox',
+              uploads: uploadsPayload,
+              metadata: entryMetadata,
+              itemId: item.id,
+            })
+            const sentKey = `${senderEnsValue}:sent`
+            if (!folderGroups.has(sentKey)) {
+              folderGroups.set(sentKey, { ownerEns: senderEnsValue, type: 'sent', items: [] })
+            }
+            folderGroups.get(sentKey).items.push({
+              ownerEns: senderEnsValue,
+              type: 'sent',
+              uploads: uploadsPayload,
+              metadata: { ...entryMetadata, folder: 'sent' },
+              itemId: item.id,
+            })
+            if (!ownerContexts.has(recipientEnsValue)) {
+              ownerContexts.set(recipientEnsValue, { mailboxRoot: null })
+            }
+            if (!ownerContexts.has(senderEnsValue)) {
+              ownerContexts.set(senderEnsValue, { mailboxRoot: null })
+            }
+          } catch (error) {
+            state.error = error
+            console.error('[outbox] Failed to prepare queued email:', {
+              id: item.id,
+              error,
+            })
           }
-          const metadataHash = computeEnvelopeMetadataHash(signatureMetadata)
-          const signature = signEnvelope(activeIdentity.signingKey, metadataHash)
-          const entryMetadata = {
-            ...entryMetadataBase,
-            signature,
-          }
-          const uploadsPayload = { recipient: recipientUpload, sender: senderUpload }
-          const inboxKey = `${recipientEnsValue}:inbox`
-          if (!folderGroups.has(inboxKey)) {
-            folderGroups.set(inboxKey, { ownerEns: recipientEnsValue, type: 'inbox', items: [] })
-          }
-          folderGroups.get(inboxKey).items.push({
-            ownerEns: recipientEnsValue,
-            type: 'inbox',
-            uploads: uploadsPayload,
-            metadata: entryMetadata,
-            itemId: item.id,
-          })
-          const sentKey = `${senderEnsValue}:sent`
-          if (!folderGroups.has(sentKey)) {
-            folderGroups.set(sentKey, { ownerEns: senderEnsValue, type: 'sent', items: [] })
-          }
-          folderGroups.get(sentKey).items.push({
-            ownerEns: senderEnsValue,
-            type: 'sent',
-            uploads: uploadsPayload,
-            metadata: { ...entryMetadata, folder: 'sent' },
-            itemId: item.id,
-          })
-          if (!ownerContexts.has(recipientEnsValue)) {
-            ownerContexts.set(recipientEnsValue, { mailboxRoot: null })
-          }
-          if (!ownerContexts.has(senderEnsValue)) {
-            ownerContexts.set(senderEnsValue, { mailboxRoot: null })
-          }
-        } catch (error) {
-          state.error = error
-          console.error('[outbox] Failed to prepare queued email:', {
-            id: item.id,
-            error,
-          })
-        }
-      }
+        })
+      )
 
       for (const [ownerEns, context] of ownerContexts.entries()) {
         let resolvedRoot = null
@@ -1928,6 +1952,12 @@ function App() {
     },
     [patchOutboxItem]
   )
+  const handleDiscardOutboxItems = useCallback(() => {
+    if (!walletAddress) return
+    clearOutboxStorage(walletAddress)
+    setOutboxItems([])
+    setStatusMessage('Cleared queued emails. You can start fresh.')
+  }, [walletAddress, setOutboxItems])
   const getOutboxStatusLabel = useCallback((status) => {
     switch (status) {
       case 'pending':
@@ -2169,6 +2199,15 @@ function App() {
                   onClick={handleDeleteSelected}
                 >
                   🗑️ Delete ({selectedEmails.length})
+                </button>
+              )}
+              {activeView === 'sent' && outboxEntries.length > 0 && (
+                <button
+                  className="toolbar-btn warning-btn"
+                  title="Discard all queued emails"
+                  onClick={handleDiscardOutboxItems}
+                >
+                  🧹 Clear queued ({outboxEntries.length})
                 </button>
               )}
             </div>
