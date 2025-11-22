@@ -1,0 +1,24 @@
+{
+  "name": "@dmail/core",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./crypto": "./src/crypto.js",
+    "./synapse": "./src/synapse.js",
+    "./ens": "./src/ens.js",
+    "./mailbox": "./src/mailbox.js",
+    "./types": "./src/types.js"
+  },
+  "dependencies": {
+    "@filoz/synapse-sdk": "^0.35.3",
+    "eth-crypto": "^2.6.0",
+    "ethers": "^6.13.4",
+    "pino": "^9.5.0",
+    "@noble/curves": "^1.4.0",
+    "@noble/hashes": "^1.4.0"
+  }
+}
+
