@@ -1002,6 +1002,15 @@ function App() {
         })
         setMailboxRoot(senderMailboxUpdate.mailboxRoot)
 
+        const appendUniqueEntry = (list, entry) => {
+          if (!entry) return list
+          const exists = list.some((item) => item.messageId === entry.messageId)
+          return exists ? list : [...list, entry]
+        }
+
+        setMailboxEntries((prev) => appendUniqueEntry(prev, recipientMailboxUpdate.entry))
+        setSentEntries((prev) => appendUniqueEntry(prev, senderMailboxUpdate.entry))
+
         setStatusMessage('Email sent successfully!')
         updateCompose({ to: '', subject: '', message: '', recipientPublicKey: '', attachments: [] })
         setPubKeyFetchError(null)
