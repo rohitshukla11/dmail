@@ -482,6 +482,51 @@ body {
   box-shadow: inset 4px 0 0 var(--compose-btn);
 }
 
+.email-item.outbox-item {
+  background: #fffbea;
+}
+
+.email-status-badge {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 12px;
+  background: #f0f4ff;
+  color: #1a73e8;
+}
+
+.email-status-badge.status-pending,
+.email-status-badge.status-sending {
+  background: #fff2db;
+  color: #b15c00;
+}
+
+.email-status-badge.status-error {
+  background: #ffe5e5;
+  color: #c62828;
+}
+
+.email-status-badge.status-sent {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.retry-btn {
+  margin-left: 12px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  border: 1px solid #c62828;
+  background: transparent;
+  color: #c62828;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.retry-btn:hover {
+  background: rgba(198, 40, 40, 0.1);
+}
+
 .email-star {
   font-size: 18px;
   color: #dadce0;
