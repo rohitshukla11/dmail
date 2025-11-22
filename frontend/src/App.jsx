@@ -93,6 +93,7 @@ function App() {
   const mailboxRootRef = useRef(null)
   const [mailboxEntries, setMailboxEntries] = useState([])
   const [sentEntries, setSentEntries] = useState([])
+  const manualDisconnectRef = useRef(false) // Track manual disconnect to prevent auto-reconnect
   
   // Keep ref in sync with state
   useEffect(() => {
@@ -443,6 +444,26 @@ function App() {
     }
     void deriveIdentityMaterial(ensName)
   }, [walletAddress, ensName, deriveIdentityMaterial])
+  
+  // Separate effect to auto-refresh inbox after wallet connection
+  useEffect(() => {
+    if (!walletAddress || !identityPublicKey) {
+      return
+    }
+    console.log('[autoRefresh] Wallet connected and identity derived, refreshing inbox...')
+    void refreshInbox()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddress, identityPublicKey])
+  
+  // Update status message when view changes to show section-specific count
+  useEffect(() => {
+    if (!walletAddress) return
+    const currentCount = activeView === 'sent' ? sentEntries.length : mailboxEntries.length
+    const sectionName = activeView === 'sent' ? 'sent' : 'inbox'
+    if (currentCount > 0) {
+      setStatusMessage(`Loaded ${currentCount} ${sectionName} email(s)`)
+    }
+  }, [activeView, mailboxEntries.length, sentEntries.length, walletAddress])
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.ethereum) {
@@ -450,6 +471,11 @@ function App() {
     }
     let cancelled = false
     const autoConnect = async () => {
+      // Skip auto-connect if user manually disconnected
+      if (manualDisconnectRef.current) {
+        console.log('[autoConnect] Skipping - user manually disconnected')
+        return
+      }
       try {
         const { BrowserProvider } = await import('ethers')
         const browserProvider = new BrowserProvider(window.ethereum)
@@ -462,6 +488,7 @@ function App() {
         const resolvedName = await resolveEnsName(address)
         setEnsName(resolvedName)
         await deriveIdentityMaterial(resolvedName)
+        // The useEffect watching walletAddress will trigger refreshInbox
       } catch (error) {
         console.warn('Auto-connect skipped', error)
       }
@@ -475,6 +502,7 @@ function App() {
   const connectWallet = useCallback(async () => {
     try {
       setErrorMessage('')
+      manualDisconnectRef.current = false // Reset disconnect flag to allow auto-reconnect
       const browserProvider = await ensureProvider()
       const accounts = await browserProvider.send('eth_requestAccounts', [])
       const address = accounts?.[0]
@@ -503,6 +531,7 @@ function App() {
         console.warn('Failed to clear identity cache on disconnect', cacheError)
       }
     }
+    manualDisconnectRef.current = true // Prevent auto-reconnect
     identityMaterialRef.current = null
     identityEnsRef.current = null
     setWalletAddress(null)
@@ -620,9 +649,7 @@ function App() {
       ])
 
       const inboxEntriesList = annotateEntriesWithSignature(getMailboxEntries(inboxMailbox))
-      const sentEntriesList = annotateEntriesWithSignature(
-        getMailboxEntries(sentMailbox).filter((entry) => entry.cidSender)
-      )
+      const sentEntriesList = annotateEntriesWithSignature(getMailboxEntries(sentMailbox))
       
       console.log('[refreshInbox] Loaded entries:', {
         inboxCount: inboxEntriesList.length,
@@ -635,16 +662,20 @@ function App() {
       // Use only the loaded entries (no merging with old data)
       setMailboxEntries(inboxEntriesList)
       setSentEntries(sentEntriesList)
-      const total =
-        getMailboxEntries(inboxMailbox).length + getMailboxEntries(sentMailbox).length
-      setStatusMessage(`Loaded ${total} email(s)`)
+      
+      // Show section-specific count based on active view
+      const inboxCount = inboxEntriesList.length
+      const sentCount = sentEntriesList.length
+      const currentViewCount = activeView === 'sent' ? sentCount : inboxCount
+      const sectionName = activeView === 'sent' ? 'sent' : 'inbox'
+      setStatusMessage(`Loaded ${currentViewCount} ${sectionName} email(s)`)
     } catch (error) {
       console.error(error)
       setErrorMessage(error.message ?? 'Failed to load mailbox')
     } finally {
       setLoadingInbox(false)
     }
-  }, [ensureProvider, ensName, getEnsProvider, walletAddress, annotateEntriesWithSignature])
+  }, [ensureProvider, ensName, getEnsProvider, walletAddress, annotateEntriesWithSignature, activeView])
 
   const refreshCalendar = useCallback(async () => {
     if (!walletAddress && !ensName) return
@@ -1229,10 +1260,13 @@ function App() {
         })
 
         setStatusMessage('Appending to sender mailbox on ENS...')
-        // Use existing sender mailbox root from ENS (appends to existing sent emails)
+        // When sending to self, use updated mailbox from inbox append; otherwise use existing sender mailbox
+        const baseMailboxForSent = isSelfRecipient 
+          ? recipientMailboxUpdate.mailboxRoot  // Use updated root from inbox append
+          : senderMailboxRoot                   // Use existing sender mailbox from ENS
         const senderMailboxUpdate = await appendSentEntry({
           ownerEns: senderEns,
-          mailboxRoot: senderMailboxRoot, // Use existing mailbox from ENS
+          mailboxRoot: baseMailboxForSent,
           uploads: { recipient: recipientUpload, sender: senderUpload },
           metadata: { ...entryMetadata, folder: 'sent' },
           persistOptions: {
