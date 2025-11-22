@@ -2,36 +2,50 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
+  appendCalendarEvent,
+  appendEmailEntry,
   appendInboxEntry,
   appendSentEntry,
+  computeEnvelopeMetadataHash,
+  createEmptyCalendar,
+  createEmptyMailbox,
   decryptEmail,
   encryptEmail,
+  ensureRegisteredIdentity,
   fetchAttachment,
+  generateCalendarIcs,
+  getCalendarUploadResult,
+  getMailboxEntries,
+  getMailboxIndexPointer,
+  loadCalendarFromCid as loadCalendarFromCidFile,
+  loadMailboxFromCid,
+  mergeMailboxRoot,
+  normalizeMailboxRoot,
+  normalizeServiceUrl,
+  persistCalendar,
+  persistMailbox,
+  resolveMailboxRoot,
+  resolvePublicKey,
+  setCalendarUploadResult,
+  setMailboxRootToEns,
+  setMailboxUploadResult,
+  setStorageServiceUrl,
+  signEnvelope,
   synapseFetch,
   synapseUpload,
-  loadMailboxFromCid,
-  createEmptyCalendar,
-  appendCalendarEvent,
-  loadCalendarFromCid as loadCalendarFromCidFile,
-  persistCalendar,
-  setMailboxUploadResult,
-  setMailboxRootToEns,
-  getCalendarUploadResult,
-  setCalendarUploadResult,
-  generateCalendarIcs,
-  resolvePublicKey,
-  resolveMailboxRoot,
   updateResolverMailboxRoot,
-  normalizeMailboxRoot,
-  getMailboxIndexPointer,
-  signEnvelope,
-  computeEnvelopeMetadataHash,
   verifyEnvelopeSignature,
-  getMailboxEntries,
-  ensureRegisteredIdentity,
-  normalizeServiceUrl,
-  setStorageServiceUrl,
 } from '@dmail/core'
+
+const cloneMailboxEntries = (entries = []) => {
+  if (!entries || entries.length === 0) {
+    return []
+  }
+  if (typeof structuredClone === 'function') {
+    return entries.map((entry) => structuredClone(entry))
+  }
+  return entries.map((entry) => JSON.parse(JSON.stringify(entry)))
+}
 
 import CalendarSidebar from './components/calendar/CalendarSidebar'
 import EventModal from './components/calendar/EventModal'
@@ -1243,6 +1257,37 @@ function App() {
         console.log('[sendEmail] Is self-recipient?', isSelfRecipient, { normalizedSenderEns, normalizedRecipientEns })
         console.log('[sendEmail] Active identity publicKey:', activeIdentity.publicKey?.substring(0, 30) + '...')
 
+        const buildMailboxSnapshot = (entries, folder) => {
+          const clonedEntries = cloneMailboxEntries(entries)
+          return {
+            owner: senderEns,
+            type: folder,
+            version: 2,
+            updatedAt: new Date().toISOString(),
+            entries: clonedEntries,
+            emails: clonedEntries,
+          }
+        }
+        const cachedSenderInboxMailbox = isSelfRecipient ? buildMailboxSnapshot(mailboxEntries, 'inbox') : null
+        const cachedSenderSentMailbox = buildMailboxSnapshot(sentEntries, 'sent')
+        const cloneMailboxForFolder = (snapshot, folder) => {
+          if (snapshot) {
+            const list = Array.isArray(snapshot.entries)
+              ? cloneMailboxEntries(snapshot.entries)
+              : Array.isArray(snapshot.emails)
+              ? cloneMailboxEntries(snapshot.emails)
+              : []
+            return {
+              ...snapshot,
+              owner: senderEns,
+              type: folder,
+              entries: list,
+              emails: list,
+            }
+          }
+          return createEmptyMailbox(senderEns, folder)
+        }
+
         let recipientPublicKey = null
         
         // Priority 1: If sending to yourself, ALWAYS use your derived identity key (ignore compose form)
@@ -1326,25 +1371,33 @@ function App() {
         let recipientUpload = null
         let senderUpload = null
         if (encryptedEmail?.version >= 2 && encryptedEmail?.recipientEnvelope) {
-          setStatusMessage('Uploading encrypted recipient copy to Filecoin storage...')
-          recipientUpload = await synapseUpload(encryptedEmail.recipientEnvelope, {
-            filename: `email-${senderEns}-${timestamp}.json`,
-            metadata: {
-              type: 'dmail-email-recipient',
-              messageId: encryptedEmail.messageId,
-            },
-          })
-
-          if (encryptedEmail.senderEnvelope) {
-            setStatusMessage('Uploading encrypted sender copy to Filecoin storage...')
-            senderUpload = await synapseUpload(encryptedEmail.senderEnvelope, {
-              filename: `email-${senderEns}-sent-${timestamp}.json`,
+          // OPTIMIZATION: Upload both envelopes in parallel instead of sequentially
+          setStatusMessage('Uploading encrypted email copies to Filecoin storage...')
+          const uploadPromises = [
+            synapseUpload(encryptedEmail.recipientEnvelope, {
+              filename: `email-${senderEns}-${timestamp}.json`,
               metadata: {
-                type: 'dmail-email-sender',
+                type: 'dmail-email-recipient',
                 messageId: encryptedEmail.messageId,
               },
             })
+          ]
+          
+          if (encryptedEmail.senderEnvelope) {
+            uploadPromises.push(
+              synapseUpload(encryptedEmail.senderEnvelope, {
+                filename: `email-${senderEns}-sent-${timestamp}.json`,
+                metadata: {
+                  type: 'dmail-email-sender',
+                  messageId: encryptedEmail.messageId,
+                },
+              })
+            )
           }
+          
+          const uploads = await Promise.all(uploadPromises)
+          recipientUpload = uploads[0]
+          senderUpload = uploads[1] || null
         } else {
           setStatusMessage('Uploading encrypted email to Filecoin storage...')
           recipientUpload = await synapseUpload(encryptedEmail, {
@@ -1356,21 +1409,33 @@ function App() {
           })
         }
 
-        setStatusMessage('Resolving mailbox pointers...')
-        const [recipientMailboxRootRaw, senderMailboxRootRaw] = await Promise.all([
-          resolveMailboxRoot(recipientEns, {
-            provider: ensProvider,
-          }),
-          resolveMailboxRoot(senderEns, {
-            provider: ensProvider,
-          }),
-        ])
-        const recipientMailboxRoot = normalizeMailboxRoot(recipientMailboxRootRaw, {
-          owner: recipientEns,
-        })
-        const senderMailboxRoot = normalizeMailboxRoot(senderMailboxRootRaw, {
-          owner: senderEns,
-        })
+        // OPTIMIZATION: Use cached mailbox roots when available instead of re-resolving
+        setStatusMessage('Preparing mailbox metadata...')
+        let recipientMailboxRoot, senderMailboxRoot
+        
+        if (isSelfRecipient) {
+          // Sending to self: Use cached mailbox root if available
+          if (mailboxRootRef.current?.owner === senderEns) {
+            recipientMailboxRoot = mailboxRootRef.current
+            senderMailboxRoot = mailboxRootRef.current
+            console.log('[sendEmail] Using cached mailbox root for self-send')
+          } else {
+            const mailboxRootRaw = await resolveMailboxRoot(senderEns, { provider: ensProvider })
+            const normalized = normalizeMailboxRoot(mailboxRootRaw, { owner: senderEns })
+            recipientMailboxRoot = normalized
+            senderMailboxRoot = normalized
+          }
+        } else {
+          // Different recipients: Resolve in parallel, using cache for sender
+          const recipientPromise = resolveMailboxRoot(recipientEns, { provider: ensProvider })
+          const senderPromise = mailboxRootRef.current?.owner === senderEns
+            ? Promise.resolve(mailboxRootRef.current)
+            : resolveMailboxRoot(senderEns, { provider: ensProvider })
+          
+          const [recipientRaw, senderRaw] = await Promise.all([recipientPromise, senderPromise])
+          recipientMailboxRoot = normalizeMailboxRoot(recipientRaw, { owner: recipientEns })
+          senderMailboxRoot = normalizeMailboxRoot(senderRaw, { owner: senderEns })
+        }
 
         const toRecipients = [recipientEns]
         const ccRecipients = []
@@ -1408,57 +1473,105 @@ function App() {
           senderCopyCid: signatureMetadata.senderCopyCid,
         }
 
-        setStatusMessage('Appending to recipient mailbox on ENS...')
-        // Use existing mailbox root from ENS (appends to existing emails)
-        const recipientMailboxUpdate = await appendInboxEntry({
-          ownerEns: recipientEns,
-          mailboxRoot: recipientMailboxRoot, // Use existing mailbox from ENS
-          uploads: { recipient: recipientUpload, sender: senderUpload },
-          metadata: entryMetadata,
-          persistOptions: {
-            metadataType: 'dmail-mailbox-inbox',
-          },
-          resolveOptions: { provider: ensProvider },
-          resolverOptions: { provider: ensProvider },
-        })
+        // OPTIMIZATION: Parallelize mailbox updates when NOT sending to self
+        let recipientMailboxUpdate, senderMailboxUpdate
         
-        console.log('[sendEmail] Inbox mailbox updated on ENS:', {
-          newCid: recipientMailboxUpdate.uploadResult?.cid,
-          mailboxRoot: recipientMailboxUpdate.mailboxRoot,
-        })
+        if (isSelfRecipient) {
+          // Self-send: build mailboxes locally and persist both in parallel (no Synapse fetch)
+          setStatusMessage('Updating local inbox/sent snapshots...')
+          const inboxMailboxClone = cloneMailboxForFolder(cachedSenderInboxMailbox, 'inbox')
+          const sentMailboxClone = cloneMailboxForFolder(cachedSenderSentMailbox, 'sent')
 
-        setStatusMessage('Appending to sender mailbox on ENS...')
-        // When sending to self, use updated mailbox from inbox append; otherwise use existing sender mailbox
-        const baseMailboxForSent = isSelfRecipient 
-          ? recipientMailboxUpdate.mailboxRoot  // Use updated root from inbox append
-          : senderMailboxRoot                   // Use existing sender mailbox from ENS
-        const senderMailboxUpdate = await appendSentEntry({
-          ownerEns: senderEns,
-          mailboxRoot: baseMailboxForSent,
-          uploads: { recipient: recipientUpload, sender: senderUpload },
-          metadata: { ...entryMetadata, folder: 'sent' },
-          persistOptions: {
-            metadataType: 'dmail-mailbox-sent',
-          },
-          resolveOptions: { provider: ensProvider },
-          resolverOptions: { provider: ensProvider },
-        })
+          const inboxEntry = appendEmailEntry(inboxMailboxClone, { recipient: recipientUpload, sender: senderUpload }, entryMetadata)
+          const sentEntry = appendEmailEntry(
+            sentMailboxClone,
+            { recipient: recipientUpload, sender: senderUpload },
+            { ...entryMetadata, folder: 'sent' }
+          )
+
+          setStatusMessage('Persisting inbox/sent mailboxes to storage...')
+          const [inboxUploadResult, sentUploadResult] = await Promise.all([
+            persistMailbox(inboxMailboxClone, {
+              owner: senderEns,
+              type: 'inbox',
+              metadataType: 'dmail-mailbox-inbox',
+            }),
+            persistMailbox(sentMailboxClone, {
+              owner: senderEns,
+              type: 'sent',
+              metadataType: 'dmail-mailbox-sent',
+            }),
+          ])
+
+          const inboxRoot = mergeMailboxRoot(senderMailboxRoot, 'inbox', inboxUploadResult, { owner: senderEns })
+          const finalRoot = mergeMailboxRoot(inboxRoot, 'sent', sentUploadResult, { owner: senderEns })
+
+          recipientMailboxUpdate = {
+            mailbox: inboxMailboxClone,
+            uploadResult: inboxUploadResult,
+            mailboxRoot: inboxRoot,
+            entry: inboxEntry,
+          }
+          senderMailboxUpdate = {
+            mailbox: sentMailboxClone,
+            uploadResult: sentUploadResult,
+            mailboxRoot: finalRoot,
+            entry: sentEntry,
+          }
+
+          try {
+            await updateResolverMailboxRoot(senderEns, finalRoot)
+          } catch (resolverError) {
+            console.warn('[sendEmail] Failed to update resolver for self-send:', resolverError)
+          }
+        } else {
+          // Different recipients: Can parallelize inbox and sent updates - saves ~5-10 seconds
+          setStatusMessage('Appending to mailboxes (parallel)...')
+          const [inbox, sent] = await Promise.all([
+            appendInboxEntry({
+              ownerEns: recipientEns,
+              mailboxRoot: recipientMailboxRoot,
+              uploads: { recipient: recipientUpload, sender: senderUpload },
+              metadata: entryMetadata,
+              persistOptions: {
+                metadataType: 'dmail-mailbox-inbox',
+              },
+              resolveOptions: { provider: ensProvider },
+              resolverOptions: { provider: ensProvider },
+            }),
+            appendSentEntry({
+              ownerEns: senderEns,
+              mailboxRoot: senderMailboxRoot,
+              uploads: { recipient: recipientUpload, sender: senderUpload },
+              metadata: { ...entryMetadata, folder: 'sent' },
+              persistOptions: {
+                metadataType: 'dmail-mailbox-sent',
+              },
+              resolveOptions: { provider: ensProvider },
+              resolverOptions: { provider: ensProvider },
+              mailbox: cachedSenderSentMailbox,
+            })
+          ])
+          recipientMailboxUpdate = inbox
+          senderMailboxUpdate = sent
+        }
         
-        console.log('[sendEmail] Sent mailbox updated on ENS:', {
+        console.log('[sendEmail] Sent mailbox updated:', {
           newCid: senderMailboxUpdate.uploadResult?.cid,
           mailboxRoot: senderMailboxUpdate.mailboxRoot,
         })
 
         // Update ENS mailbox pointer for the connected account to ensure refresh uses the new CID
         // Use setMailboxRootToEns to update BOTH inbox and sent pointers
+        // OPTIMIZATION: Don't wait for blockchain confirmation (wait: false) - saves ~60+ seconds
         try {
           setStatusMessage('Updating ENS text records (inbox + sent)...')
           await setMailboxRootToEns(senderEns, senderMailboxUpdate.mailboxRoot, {
             provider: browserProvider,
             signer,
-            wait: true,
+            wait: false, // Don't wait for blockchain confirmation - major time saver!
           })
-          console.log('[sendEmail] ✓ Updated ENS with full mailbox root:', {
+          console.log('[sendEmail] ✓ ENS update initiated (not waiting for confirmation):', {
             inboxCid: senderMailboxUpdate.mailboxRoot?.inbox?.cid,
             sentCid: senderMailboxUpdate.mailboxRoot?.sent?.cid,
           })
@@ -1466,15 +1579,29 @@ function App() {
           console.warn('[sendEmail] Failed to update ENS mailbox pointers:', ensUpdateError)
         }
 
-        setStatusMessage('Email sent successfully! Refreshing inbox...')
+        // OPTIMIZATION: Use optimistic updates instead of full refresh - saves mailbox fetching time
+        setStatusMessage('Email sent successfully!')
+        
+        // Update local state immediately with the new entry (optimistic update)
+        const newEntry = senderMailboxUpdate.entry || {
+          ...entryMetadata,
+          cid: recipientUpload?.cid,
+          _optimistic: true,
+        }
+        
+        // Update both inbox and sent lists
+        if (isSelfRecipient) {
+          setMailboxEntries(prev => [newEntry, ...prev])
+        }
+        setSentEntries(prev => [newEntry, ...prev])
+        setMailboxRoot(senderMailboxUpdate.mailboxRoot)
+        
+        // Clear compose form
         updateCompose({ to: '', subject: '', message: '', recipientPublicKey: '', attachments: [] })
         setPubKeyFetchError(null)
         setShowManualPubKey(false)
         setFetchingPubKey(false)
         setShowCompose(false)
-        
-        // Refresh inbox to fetch updated mailbox from ENS
-        await refreshInbox()
       } catch (error) {
         console.error(error)
         setErrorMessage(error.message ?? 'Failed to send email')
@@ -1488,6 +1615,8 @@ function App() {
       composeState.recipientPublicKey,
       composeState.subject,
       composeState.to,
+      mailboxEntries,
+      sentEntries,
       ensureProvider,
       ensName,
       provider,

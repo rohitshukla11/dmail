@@ -49,18 +49,16 @@ export async function getMailboxUploadResult(ensName, options = {}) {
   if (!resolver) return null
   const value = await resolver.getText(MAILBOX_KEY)
   if (!value) return null
-  
-  // Try to parse as JSON (new format with provider info)
+
   try {
     return JSON.parse(value)
   } catch {
-    // Legacy format: just CID string, return as object for backward compatibility
-    // Note: This won't work with new Synapse-only retrieval, but allows migration
     return { cid: value }
   }
 }
 
-// Get full mailbox root with both inbox and sent pointers from ENS
+// Get full mailbox root with both inbox and sent pointers from ENS.
+// Supports both the legacy (single pointer) format and the new JSON root format.
 export async function getMailboxRootFromEns(ensName, options = {}) {
   if (!ensName) {
     throw new Error('getMailboxRootFromEns: ensName is required')
@@ -68,29 +66,48 @@ export async function getMailboxRootFromEns(ensName, options = {}) {
   const provider = options.provider ?? createDefaultProvider()
   const resolver = await provider.getResolver(ensName)
   if (!resolver) return null
-  
-  // Fetch both inbox and sent pointers in parallel
-  const [inboxValue, sentValue] = await Promise.all([
-    resolver.getText(MAILBOX_KEY),
-    resolver.getText(MAILBOX_SENT_KEY)
-  ])
-  
-  if (!inboxValue && !sentValue) return null
-  
+
+  const primaryValue = await resolver.getText(MAILBOX_KEY)
+  if (!primaryValue) return null
+
   const parsePointer = (value) => {
     if (!value) return null
+    if (typeof value === 'object') {
+      return value
+    }
     try {
       return JSON.parse(value)
     } catch {
       return { cid: value }
     }
   }
-  
+
+  let parsedRoot = null
+  try {
+    parsedRoot = JSON.parse(primaryValue)
+  } catch {
+    parsedRoot = null
+  }
+
+  if (parsedRoot && (parsedRoot.inbox || parsedRoot.sent)) {
+    return {
+      owner: parsedRoot.owner ?? ensName,
+      version: parsedRoot.version ?? 2,
+      inbox: parsePointer(parsedRoot.inbox),
+      sent: parsePointer(parsedRoot.sent),
+    }
+  }
+
+  // Legacy format: mailbox key stored only inbox pointer string; sent pointer (if any) lives in MAILBOX_SENT_KEY.
+  const legacyInbox = parsePointer(primaryValue)
+  const legacySentValue = await resolver.getText(MAILBOX_SENT_KEY)
+  const legacySent = parsePointer(legacySentValue)
+
   return {
     owner: ensName,
     version: 2,
-    inbox: parsePointer(inboxValue),
-    sent: parsePointer(sentValue),
+    inbox: legacyInbox,
+    sent: legacySent,
   }
 }
 
@@ -201,41 +218,31 @@ export async function setMailboxRootToEns(ensName, mailboxRoot, options = {}) {
     ['function setText(bytes32 node, string key, string value) external'],
     signer
   )
-  
+
   const serializePointer = (pointer) => {
-    if (!pointer) return ''
-    const storageInfo = {
+    if (!pointer) return null
+    return {
       cid: pointer.cid,
       pieceCid: pointer.pieceCid,
       providerId: pointer.providerInfo?.id,
       providerAddress: pointer.providerInfo?.address,
       serviceURL: normalizeServiceUrl(getStorageServiceUrl(pointer.providerInfo)),
     }
-    return JSON.stringify(storageInfo)
   }
 
-  const node = namehash(ensName)
-  const txs = []
-  
-  // Set inbox pointer if provided
-  if (mailboxRoot.inbox) {
-    const inboxValue = serializePointer(mailboxRoot.inbox)
-    const tx = await resolverContract.setText(node, MAILBOX_KEY, inboxValue)
-    txs.push(tx)
-  }
-  
-  // Set sent pointer if provided
-  if (mailboxRoot.sent) {
-    const sentValue = serializePointer(mailboxRoot.sent)
-    const tx = await resolverContract.setText(node, MAILBOX_SENT_KEY, sentValue)
-    txs.push(tx)
-  }
-  
+  const payload = JSON.stringify({
+    owner: mailboxRoot.owner ?? ensName,
+    version: mailboxRoot.version ?? 2,
+    inbox: serializePointer(mailboxRoot.inbox),
+    sent: serializePointer(mailboxRoot.sent),
+  })
+
+  const tx = await resolverContract.setText(namehash(ensName), MAILBOX_KEY, payload)
   if (options.wait !== false) {
-    await Promise.all(txs.map(tx => tx.wait()))
+    await tx.wait()
   }
-  
-  return txs
+
+  return tx.hash ?? tx
 }
 
 export async function setCalendarUploadResult(ensName, uploadResult, options = {}) {
