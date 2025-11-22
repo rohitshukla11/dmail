@@ -494,6 +494,34 @@ function App() {
     }
   }, [ensureProvider, resolveEnsName])
 
+  const handleDisconnectWallet = useCallback(() => {
+    const domain = getBrowserHostname()
+    if (walletAddress) {
+      try {
+        clearIdentityCache(walletAddress.toLowerCase(), domain)
+      } catch (cacheError) {
+        console.warn('Failed to clear identity cache on disconnect', cacheError)
+      }
+    }
+    identityMaterialRef.current = null
+    identityEnsRef.current = null
+    setWalletAddress(null)
+    setEnsName(null)
+    setProvider(null)
+    setIdentityPublicKey(null)
+    setMailboxRoot(null)
+    setMailboxUploadResultState(null)
+    setMailboxEntries([])
+    setSentEntries([])
+    setSelectedEmail(null)
+    setComposeState({ to: '', subject: '', message: '', recipientPublicKey: '', attachments: [] })
+    setCalendarEvents([])
+    setCalendarUploadResultState(null)
+    setCalendarError('')
+    setStatusMessage('Wallet disconnected')
+    setErrorMessage('')
+  }, [walletAddress])
+
   const updateCompose = (changes) => {
     setComposeState((prev) => ({
       ...prev,
@@ -933,12 +961,23 @@ function App() {
           throw new Error('ENS name not resolved for calendar')
         }
 
-        // Create a fresh calendar with only new events (ignore old calendar)
-        console.log('[handleSaveEvent] Creating fresh calendar')
-        const calendarData = createEmptyCalendar(ownerEns)
+        // Fetch existing calendar from ENS and append to it
+        const existingUploadResult = await getCalendarUploadResult(ownerEns, { provider: ensProvider })
+        let calendarData
+        
+        if (existingUploadResult?.cid) {
+          console.log('[handleSaveEvent] Loading existing calendar from ENS:', existingUploadResult.cid)
+          calendarData = await loadCalendarFromCidFile(existingUploadResult, { optional: true })
+        }
+        
+        if (!calendarData) {
+          console.log('[handleSaveEvent] No existing calendar, creating new one')
+          calendarData = createEmptyCalendar(ownerEns)
+        }
 
         const updatedCalendar = appendCalendarEvent(calendarData, eventInput)
-        console.log('[handleSaveEvent] Creating new calendar with event:', {
+        console.log('[handleSaveEvent] Appending event to calendar:', {
+          existingEventsCount: calendarData.events?.length ?? 0,
           newEventCount: updatedCalendar.events.length,
         })
         const uploadResult = await persistCalendar(updatedCalendar, {
@@ -982,22 +1021,16 @@ function App() {
           throw new Error('ENS name not resolved for connected wallet. Set one before sending.')
         }
 
-        const recipientEns = composeState.to
-        if (!recipientEns) {
+        const recipientInput = composeState.to?.trim()
+        if (!recipientInput) {
           throw new Error('Recipient ENS name is required')
         }
+        const recipientEns = recipientInput
+        const normalizedRecipientEns = recipientEns.toLowerCase()
+        const normalizedSenderEns = senderEns?.toLowerCase() ?? null
+        const isSelfRecipient = normalizedSenderEns && normalizedSenderEns === normalizedRecipientEns
 
-        const recipientPublicKey =
-          composeState.recipientPublicKey ||
-          (await resolvePublicKey(recipientEns, { provider: ensProvider, ensName: recipientEns })) ||
-          import.meta.env.VITE_RECIPIENT_PUBLIC_KEY
-
-        if (!recipientPublicKey) {
-          throw new Error(
-            `Recipient public key missing. Ask ${recipientEns} to open dMail v2 once or provide a manual key.`
-          )
-        }
-
+        // Ensure identity is derived first (needed for self-sending)
         const activeIdentity = identityMaterialRef.current ?? (await ensureIdentityMaterial(senderEns))
         if (!activeIdentity) {
           throw new Error('Unable to prepare identity keys. Reconnect wallet and try again.')
@@ -1005,6 +1038,63 @@ function App() {
         if (!activeIdentity.signingKey || !activeIdentity.signingPublicKey) {
           throw new Error('Identity signing material missing. Reconnect wallet to derive identity again.')
         }
+
+        console.log('[sendEmail] Sender ENS:', senderEns)
+        console.log('[sendEmail] Recipient input:', recipientInput)
+        console.log('[sendEmail] Is self-recipient?', isSelfRecipient, { normalizedSenderEns, normalizedRecipientEns })
+        console.log('[sendEmail] Active identity publicKey:', activeIdentity.publicKey?.substring(0, 30) + '...')
+
+        let recipientPublicKey = null
+        
+        // Priority 1: If sending to yourself, ALWAYS use your derived identity key (ignore compose form)
+        if (isSelfRecipient) {
+          recipientPublicKey = activeIdentity.publicKey
+          console.log('[sendEmail] ✓ Sending to self, using derived identity key (v2 X25519):', recipientPublicKey?.substring(0, 30) + '...')
+        }
+        // Priority 2: Use manually entered key from compose form
+        else if (composeState.recipientPublicKey?.trim()) {
+          recipientPublicKey = composeState.recipientPublicKey.trim()
+          console.log('[sendEmail] Using manually entered public key from compose form:', recipientPublicKey?.substring(0, 30) + '...')
+        }
+        // Priority 3: Resolve from ENS/resolver
+        else {
+          console.log('[sendEmail] Resolving public key for recipient:', recipientEns)
+          recipientPublicKey =
+            (await resolvePublicKey(recipientEns, {
+              provider: ensProvider,
+              ensName: recipientEns,
+              disableEnsFallback: true,
+            })) || import.meta.env.VITE_RECIPIENT_PUBLIC_KEY
+          console.log('[sendEmail] Resolved public key:', recipientPublicKey?.substring(0, 30) + '...')
+        }
+
+        if (!recipientPublicKey) {
+          throw new Error(
+            `Recipient public key missing. Ask ${recipientEns} to open dMail v2 once or provide a manual key.`
+          )
+        }
+
+        const normalizedRecipientKey = recipientPublicKey.trim()
+        const looksLikeLegacyKey =
+          normalizedRecipientKey.startsWith('0x04') ||
+          (/^0x[0-9a-fA-F]+$/.test(normalizedRecipientKey) ||
+            (/^[0-9a-fA-F]+$/.test(normalizedRecipientKey) &&
+              normalizedRecipientKey.length >= 66))
+
+        console.log('[sendEmail] Recipient key validation:', {
+          key: normalizedRecipientKey.substring(0, 30) + '...',
+          looksLikeLegacyKey,
+          startsWithHex: normalizedRecipientKey.startsWith('0x'),
+          length: normalizedRecipientKey.length
+        })
+
+        if (looksLikeLegacyKey) {
+          throw new Error(
+            `Recipient ${recipientEns} is still using the legacy dMail key. Ask them to open dMail v2 so their resolver publishes the new X25519 key.`
+          )
+        }
+
+        recipientPublicKey = normalizedRecipientKey
 
         const timestamp = Date.now()
         const subjectPreview = composeState.subject?.slice(0, 120) ?? ''
@@ -1042,8 +1132,6 @@ function App() {
             filename: `email-${senderEns}-${timestamp}.json`,
             metadata: {
               type: 'dmail-email-recipient',
-              from: senderEns,
-              to: recipientEns,
               messageId: encryptedEmail.messageId,
             },
           })
@@ -1054,8 +1142,6 @@ function App() {
               filename: `email-${senderEns}-sent-${timestamp}.json`,
               metadata: {
                 type: 'dmail-email-sender',
-                from: senderEns,
-                to: recipientEns,
                 messageId: encryptedEmail.messageId,
               },
             })
@@ -1066,8 +1152,7 @@ function App() {
             filename: `email-${senderEns}-${timestamp}.json`,
             metadata: {
               type: 'dmail-email',
-              from: senderEns,
-              to: recipientEns,
+              messageId: encryptedEmail.messageId,
             },
           })
         }
@@ -1124,12 +1209,11 @@ function App() {
           senderCopyCid: signatureMetadata.senderCopyCid,
         }
 
-        setStatusMessage('Creating new mailbox on ENS...')
-        // Create a fresh mailbox with only this new email (ignore old mailbox)
-        const freshMailboxRoot = { owner: recipientEns, version: 2, inbox: null, sent: null }
+        setStatusMessage('Appending to recipient mailbox on ENS...')
+        // Use existing mailbox root from ENS (appends to existing emails)
         const recipientMailboxUpdate = await appendInboxEntry({
           ownerEns: recipientEns,
-          mailboxRoot: freshMailboxRoot, // Fresh mailbox, no old emails
+          mailboxRoot: recipientMailboxRoot, // Use existing mailbox from ENS
           uploads: { recipient: recipientUpload, sender: senderUpload },
           metadata: entryMetadata,
           persistOptions: {
@@ -1139,16 +1223,16 @@ function App() {
           resolverOptions: { provider: ensProvider },
         })
         
-        console.log('[sendEmail] New inbox mailbox created on ENS:', {
+        console.log('[sendEmail] Inbox mailbox updated on ENS:', {
           newCid: recipientMailboxUpdate.uploadResult?.cid,
           mailboxRoot: recipientMailboxUpdate.mailboxRoot,
         })
 
-        setStatusMessage('Updating sent mailbox on ENS...')
-        // Use the fresh mailbox root from inbox update
+        setStatusMessage('Appending to sender mailbox on ENS...')
+        // Use existing sender mailbox root from ENS (appends to existing sent emails)
         const senderMailboxUpdate = await appendSentEntry({
           ownerEns: senderEns,
-          mailboxRoot: recipientMailboxUpdate.mailboxRoot, // Use fresh mailbox from above
+          mailboxRoot: senderMailboxRoot, // Use existing mailbox from ENS
           uploads: { recipient: recipientUpload, sender: senderUpload },
           metadata: { ...entryMetadata, folder: 'sent' },
           persistOptions: {
@@ -1164,7 +1248,11 @@ function App() {
         })
 
         // Update ENS mailbox pointer for the connected account to ensure refresh uses the new CID
-        const senderInboxPointer = getMailboxIndexPointer(senderMailboxUpdate.mailboxRoot, 'inbox')
+        const senderInboxPointer =
+          getMailboxIndexPointer(senderMailboxUpdate.mailboxRoot, 'inbox') ??
+          getMailboxIndexPointer(recipientMailboxUpdate.mailboxRoot, 'inbox') ??
+          recipientMailboxUpdate.uploadResult
+
         if (senderInboxPointer?.cid) {
           try {
             await setMailboxUploadResult(senderEns, senderInboxPointer, {
@@ -1177,7 +1265,9 @@ function App() {
             console.warn('[sendEmail] Failed to update ENS mailbox pointer:', ensUpdateError)
           }
         } else {
-          console.warn('[sendEmail] No inbox pointer available to persist on ENS')
+          console.warn('[sendEmail] No inbox pointer available to persist on ENS', {
+            senderMailboxRoot: senderMailboxUpdate.mailboxRoot,
+          })
         }
 
         setStatusMessage('Email sent successfully! Refreshing inbox...')
@@ -1292,6 +1382,13 @@ function App() {
               <span className="user-info" title={walletAddress}>
                 {ensName || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`}
               </span>
+              <button
+                className="icon-btn disconnect-btn"
+                onClick={handleDisconnectWallet}
+                title="Disconnect Wallet"
+              >
+                ✖
+              </button>
             </div>
           ) : (
             <>

@@ -181,6 +181,16 @@ body {
   background: var(--color-hover);
 }
 
+.disconnect-btn {
+  margin-left: 8px;
+  color: var(--color-error);
+  font-size: 16px;
+}
+
+.disconnect-btn:hover {
+  background: rgba(234, 67, 53, 0.08);
+}
+
 .user-info {
   font-size: 14px;
   color: var(--color-text-secondary);
