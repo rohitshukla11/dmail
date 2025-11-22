@@ -2,14 +2,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
-  appendInboxEntry,
-  appendSentEntry,
+  appendInboxEntriesBatch,
+  appendSentEntriesBatch,
   decryptEmail,
   encryptEmail,
   fetchAttachment,
   synapseFetch,
   synapseUpload,
-  loadMailboxFromCid,
+  fetchMailboxIndex,
   createEmptyCalendar,
   appendCalendarEvent,
   loadCalendarFromCid as loadCalendarFromCidFile,
@@ -815,17 +815,15 @@ function App() {
         return
       }
 
-      const [inboxMailbox, sentMailbox] = await Promise.all([
-        inboxPointer?.cid
-          ? loadMailboxFromCid(inboxPointer, { optional: true })
-          : Promise.resolve(null),
-        sentPointer?.cid
-          ? loadMailboxFromCid(sentPointer, { optional: true })
-          : Promise.resolve(null),
+      const [inboxIndex, sentIndex] = await Promise.all([
+        fetchMailboxIndex(ownerIdentifier, normalizedRoot, 'inbox'),
+        fetchMailboxIndex(ownerIdentifier, normalizedRoot, 'sent'),
       ])
 
-      const inboxEntriesList = annotateEntriesWithSignature(getMailboxEntries(inboxMailbox))
-      const sentEntriesList = annotateEntriesWithSignature(getMailboxEntries(sentMailbox))
+      const inboxEntriesList = annotateEntriesWithSignature(
+        getMailboxEntries(inboxIndex.mailbox)
+      )
+      const sentEntriesList = annotateEntriesWithSignature(getMailboxEntries(sentIndex.mailbox))
       
       console.log('[refreshInbox] Loaded entries:', {
         inboxCount: inboxEntriesList.length,
@@ -1534,219 +1532,261 @@ function App() {
     ]
   )
 
-  const deliverOutboxItem = useCallback(
-    async (item) => {
-      if (!item) {
-        throw new Error('Outbox item missing')
+  const deliverOutboxBatch = useCallback(
+    async (items) => {
+      if (!items || items.length === 0) {
+        return { itemResults: new Map(), ownerRoots: new Map() }
       }
-      console.log('[outbox] Starting delivery for queued email', {
-        id: item.id,
-        messageId: item.metadata?.messageId,
-        to: item.recipientEns,
-      })
       const browserProvider = await ensureProvider()
       const signer = await browserProvider.getSigner()
       const ensProvider = await getEnsProvider()
-      const senderEns =
-        item.senderEns ??
+      const primarySenderEns =
         ensName ??
+        items.find((candidate) => candidate?.senderEns)?.senderEns ??
         (walletAddress ? await ensProvider.lookupAddress(walletAddress) : null)
-      const recipientEns = item.recipientEns
-
-      if (!senderEns) {
-        throw new Error('Sender ENS not available. Reconnect wallet and try again.')
-      }
-      if (!recipientEns) {
-        throw new Error('Outbox item missing recipient ENS.')
-      }
-
       const activeIdentity =
-        identityMaterialRef.current ?? (await ensureIdentityMaterial(senderEns))
+        identityMaterialRef.current ?? (await ensureIdentityMaterial(primarySenderEns))
       if (!activeIdentity?.signingKey || !activeIdentity?.signingPublicKey) {
         throw new Error('Identity signing material missing. Reconnect wallet to derive identity again.')
       }
 
-      const recipientEnvelope = item.encryptedEnvelopes?.recipient
-      if (!recipientEnvelope) {
-        throw new Error('Outbox item missing recipient envelope payload.')
-      }
+      const itemStates = new Map()
+      const folderGroups = new Map()
+      const ownerContexts = new Map()
 
-      const uploadName = `${senderEns}-${item.timestamp ?? Date.now()}`
-      const uploadPromises = [
-        synapseUpload(recipientEnvelope, {
-          filename: `email-${uploadName}.json`,
-          metadata: {
-            type: 'dmail-email-recipient',
+      for (const item of items) {
+        const state = {
+          item,
+          senderEntry: null,
+          recipientEntry: null,
+          error: null,
+          senderEns: item.senderEns ?? primarySenderEns,
+          recipientEns: item.recipientEns,
+        }
+        itemStates.set(item.id, state)
+        try {
+          const senderEnsValue = state.senderEns
+          const recipientEnsValue = state.recipientEns
+          if (!senderEnsValue) {
+            throw new Error('Sender ENS not available. Reconnect wallet and try again.')
+          }
+          if (!recipientEnsValue) {
+            throw new Error('Outbox item missing recipient ENS.')
+          }
+          const recipientEnvelope = item.encryptedEnvelopes?.recipient
+          if (!recipientEnvelope) {
+            throw new Error('Outbox item missing recipient envelope payload.')
+          }
+          const uploadName = `${senderEnsValue}-${item.timestamp ?? Date.now()}`
+          const uploadPromises = [
+            synapseUpload(recipientEnvelope, {
+              filename: `email-${uploadName}.json`,
+              metadata: {
+                type: 'dmail-email-recipient',
+                messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
+              },
+            }),
+          ]
+          if (item.encryptedEnvelopes?.sender) {
+            uploadPromises.push(
+              synapseUpload(item.encryptedEnvelopes.sender, {
+                filename: `email-${uploadName}-sent.json`,
+                metadata: {
+                  type: 'dmail-email-sender',
+                  messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
+                },
+              })
+            )
+          }
+          const [recipientUpload, senderUpload] = await Promise.all(uploadPromises)
+          const toRecipients = item.metadata?.toRecipients ?? [recipientEnsValue]
+          const ccRecipients = item.metadata?.cc ?? []
+          const entryMetadataBase = {
+            from: senderEnsValue,
+            to: recipientEnsValue,
+            toRecipients,
+            cc: ccRecipients,
+            timestamp: item.timestamp,
+            subjectPreview: item.metadata?.subjectPreview ?? '(No subject)',
             messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
-          },
-        }),
-      ]
-      if (item.encryptedEnvelopes?.sender) {
-        uploadPromises.push(
-          synapseUpload(item.encryptedEnvelopes.sender, {
-            filename: `email-${uploadName}-sent.json`,
-            metadata: {
-              type: 'dmail-email-sender',
-              messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
-            },
-          })
-        )
-      }
-      const uploads = await Promise.all(uploadPromises)
-      const recipientUpload = uploads[0]
-      const senderUpload = uploads[1] || null
-      console.log('[outbox] Uploaded encrypted envelopes', {
-        id: item.id,
-        recipientCid: recipientUpload?.cid,
-        senderCid: senderUpload?.cid,
-      })
+            attachments: item.metadata?.attachments ?? [],
+            ephemeralPublicKey: recipientEnvelope.ephemeralPublicKey ?? null,
+            signerPublicKey: activeIdentity.signingPublicKey,
+            bodyCid: recipientUpload?.cid ?? null,
+            keyEnvelopesCid: recipientUpload?.cid ?? null,
+            senderCopyCid: senderUpload?.cid ?? null,
+          }
 
-      const recipientMailboxRootRaw = await resolveMailboxRoot(recipientEns, {
-        provider: ensProvider,
-      })
-      const recipientMailboxRoot = normalizeMailboxRoot(recipientMailboxRootRaw, {
-        owner: recipientEns,
-      })
+          if (!entryMetadataBase.bodyCid || !entryMetadataBase.keyEnvelopesCid) {
+            throw new Error('Failed to compute envelope metadata for this message.')
+          }
 
-      let senderMailboxRoot
-      if (item.isSelfRecipient) {
-        senderMailboxRoot = recipientMailboxRoot
-      } else if (mailboxRootRef.current?.owner === senderEns) {
-        senderMailboxRoot = mailboxRootRef.current
-      } else {
-        const senderMailboxRootRaw = await resolveMailboxRoot(senderEns, {
-          provider: ensProvider,
-        })
-        senderMailboxRoot = normalizeMailboxRoot(senderMailboxRootRaw, {
-          owner: senderEns,
-        })
-      }
-
-      const toRecipients = item.metadata?.toRecipients ?? [recipientEns]
-      const ccRecipients = item.metadata?.cc ?? []
-      const entryMetadataBase = {
-        from: senderEns,
-        to: recipientEns,
-        toRecipients,
-        cc: ccRecipients,
-        timestamp: item.timestamp,
-        subjectPreview: item.metadata?.subjectPreview ?? '(No subject)',
-        messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
-        attachments: item.metadata?.attachments ?? [],
-        ephemeralPublicKey: recipientEnvelope.ephemeralPublicKey ?? null,
-        signerPublicKey: activeIdentity.signingPublicKey,
-        bodyCid: recipientUpload?.cid ?? null,
-        keyEnvelopesCid: recipientUpload?.cid ?? null,
-        senderCopyCid: senderUpload?.cid ?? null,
-      }
-
-      if (!entryMetadataBase.bodyCid || !entryMetadataBase.keyEnvelopesCid) {
-        throw new Error('Failed to compute envelope metadata for this message.')
-      }
-
-      const signatureMetadata = {
-        messageId: entryMetadataBase.messageId,
-        bodyCid: entryMetadataBase.bodyCid,
-        keyEnvelopesCid: entryMetadataBase.keyEnvelopesCid,
-        senderCopyCid: entryMetadataBase.senderCopyCid,
-        from: senderEns,
-        to: toRecipients,
-        cc: ccRecipients,
-        timestamp: item.timestamp,
-        ephemeralPublicKey: entryMetadataBase.ephemeralPublicKey ?? null,
-      }
-
-      const metadataHash = computeEnvelopeMetadataHash(signatureMetadata)
-      const signature = signEnvelope(activeIdentity.signingKey, metadataHash)
-      const entryMetadata = {
-        ...entryMetadataBase,
-        signature,
-      }
-
-      let recipientMailboxUpdate
-      let senderMailboxUpdate
-      if (item.isSelfRecipient) {
-        recipientMailboxUpdate = await appendInboxEntry({
-          ownerEns: recipientEns,
-          mailboxRoot: recipientMailboxRoot,
-          uploads: { recipient: recipientUpload, sender: senderUpload },
-          metadata: entryMetadata,
-          persistOptions: {
-            metadataType: 'dmail-mailbox-inbox',
-          },
-          resolveOptions: { provider: ensProvider },
-          resolverOptions: { provider: ensProvider },
-        })
-        senderMailboxUpdate = await appendSentEntry({
-          ownerEns: senderEns,
-          mailboxRoot: recipientMailboxUpdate.mailboxRoot,
-          uploads: { recipient: recipientUpload, sender: senderUpload },
-          metadata: { ...entryMetadata, folder: 'sent' },
-          persistOptions: {
-            metadataType: 'dmail-mailbox-sent',
-          },
-          resolveOptions: { provider: ensProvider },
-          resolverOptions: { provider: ensProvider },
-        })
-      } else {
-        const [inboxUpdate, sentUpdate] = await Promise.all([
-          appendInboxEntry({
-            ownerEns: recipientEns,
-            mailboxRoot: recipientMailboxRoot,
-            uploads: { recipient: recipientUpload, sender: senderUpload },
+          const signatureMetadata = {
+            messageId: entryMetadataBase.messageId,
+            bodyCid: entryMetadataBase.bodyCid,
+            keyEnvelopesCid: entryMetadataBase.keyEnvelopesCid,
+            senderCopyCid: entryMetadataBase.senderCopyCid,
+            from: senderEnsValue,
+            to: toRecipients,
+            cc: ccRecipients,
+            timestamp: item.timestamp,
+            ephemeralPublicKey: entryMetadataBase.ephemeralPublicKey ?? null,
+          }
+          const metadataHash = computeEnvelopeMetadataHash(signatureMetadata)
+          const signature = signEnvelope(activeIdentity.signingKey, metadataHash)
+          const entryMetadata = {
+            ...entryMetadataBase,
+            signature,
+          }
+          const uploadsPayload = { recipient: recipientUpload, sender: senderUpload }
+          const inboxKey = `${recipientEnsValue}:inbox`
+          if (!folderGroups.has(inboxKey)) {
+            folderGroups.set(inboxKey, { ownerEns: recipientEnsValue, type: 'inbox', items: [] })
+          }
+          folderGroups.get(inboxKey).items.push({
+            ownerEns: recipientEnsValue,
+            type: 'inbox',
+            uploads: uploadsPayload,
             metadata: entryMetadata,
-            persistOptions: {
-              metadataType: 'dmail-mailbox-inbox',
-            },
-            resolveOptions: { provider: ensProvider },
-            resolverOptions: { provider: ensProvider },
-          }),
-          appendSentEntry({
-            ownerEns: senderEns,
-            mailboxRoot: senderMailboxRoot,
-            uploads: { recipient: recipientUpload, sender: senderUpload },
+            itemId: item.id,
+          })
+          const sentKey = `${senderEnsValue}:sent`
+          if (!folderGroups.has(sentKey)) {
+            folderGroups.set(sentKey, { ownerEns: senderEnsValue, type: 'sent', items: [] })
+          }
+          folderGroups.get(sentKey).items.push({
+            ownerEns: senderEnsValue,
+            type: 'sent',
+            uploads: uploadsPayload,
             metadata: { ...entryMetadata, folder: 'sent' },
-            persistOptions: {
-              metadataType: 'dmail-mailbox-sent',
-            },
-            resolveOptions: { provider: ensProvider },
-            resolverOptions: { provider: ensProvider },
-          }),
-        ])
-        recipientMailboxUpdate = inboxUpdate
-        senderMailboxUpdate = sentUpdate
+            itemId: item.id,
+          })
+          if (!ownerContexts.has(recipientEnsValue)) {
+            ownerContexts.set(recipientEnsValue, { mailboxRoot: null })
+          }
+          if (!ownerContexts.has(senderEnsValue)) {
+            ownerContexts.set(senderEnsValue, { mailboxRoot: null })
+          }
+        } catch (error) {
+          state.error = error
+          console.error('[outbox] Failed to prepare queued email:', {
+            id: item.id,
+            error,
+          })
+        }
       }
 
-      try {
-        await setMailboxRootToEns(senderEns, senderMailboxUpdate.mailboxRoot, {
-          provider: browserProvider,
-          signer,
-          wait: false,
-        })
-      } catch (ensUpdateError) {
-        console.warn('[outbox] Failed to update ENS mailbox pointers:', ensUpdateError)
+      for (const [ownerEns, context] of ownerContexts.entries()) {
+        let resolvedRoot = null
+        if (ownerEns === ensName && mailboxRootRef.current?.owner === ownerEns) {
+          resolvedRoot = mailboxRootRef.current
+        } else {
+          const rootRaw = await resolveMailboxRoot(ownerEns, { provider: ensProvider })
+          resolvedRoot = normalizeMailboxRoot(rootRaw, { owner: ownerEns })
+        }
+        context.mailboxRoot = resolvedRoot
       }
 
-      mailboxRootRef.current = senderMailboxUpdate.mailboxRoot
-      console.log('[outbox] Appended mailbox entries on ENS resolver', {
-        id: item.id,
-        inboxCid: recipientMailboxUpdate?.uploadResult?.cid,
-        sentCid: senderMailboxUpdate?.uploadResult?.cid,
+      const ownerRoots = new Map()
+      const groupedByOwner = new Map()
+      folderGroups.forEach((group) => {
+        if (!groupedByOwner.has(group.ownerEns)) {
+          groupedByOwner.set(group.ownerEns, [])
+        }
+        groupedByOwner.get(group.ownerEns).push(group)
       })
+
+      for (const [ownerEns, operations] of groupedByOwner.entries()) {
+        const context = ownerContexts.get(ownerEns) ?? { mailboxRoot: null }
+        operations.sort((a, b) => {
+          if (a.type === b.type) return 0
+          return a.type === 'inbox' ? -1 : 1
+        })
+        for (const op of operations) {
+          const eligibleItems = op.items.filter((entry) => {
+            const state = itemStates.get(entry.itemId)
+            return state && !state.error
+          })
+          if (!eligibleItems.length) {
+            continue
+          }
+          try {
+            const batchResult =
+              op.type === 'inbox'
+                ? await appendInboxEntriesBatch({
+                    ownerEns,
+                    mailboxRoot: context.mailboxRoot,
+                    items: eligibleItems,
+                    persistOptions: { metadataType: 'dmail-mailbox-inbox' },
+                    resolveOptions: { provider: ensProvider },
+                    resolverOptions: { provider: ensProvider },
+                  })
+                : await appendSentEntriesBatch({
+                    ownerEns,
+                    mailboxRoot: context.mailboxRoot,
+                    items: eligibleItems,
+                    persistOptions: { metadataType: 'dmail-mailbox-sent' },
+                    resolveOptions: { provider: ensProvider },
+                    resolverOptions: { provider: ensProvider },
+                  })
+            context.mailboxRoot = batchResult.mailboxRoot
+            ownerRoots.set(ownerEns, batchResult.mailboxRoot)
+            batchResult.entries.forEach((entry, index) => {
+              const opItem = eligibleItems[index]
+              const state = itemStates.get(opItem.itemId)
+              if (!state) return
+              if (op.type === 'inbox') {
+                state.recipientEntry = entry
+              } else {
+                state.senderEntry = entry
+              }
+            })
+          } catch (error) {
+            console.error(`[outbox] Failed to append ${op.type} entries for ${ownerEns}:`, error)
+            eligibleItems.forEach((opItem) => {
+              const state = itemStates.get(opItem.itemId)
+              if (state && !state.error) {
+                state.error = error
+              }
+            })
+          }
+        }
+        if (ownerEns === primarySenderEns && context.mailboxRoot) {
+          try {
+            await setMailboxRootToEns(ownerEns, context.mailboxRoot, {
+              provider: browserProvider,
+              signer,
+              wait: false,
+            })
+          } catch (ensUpdateError) {
+            console.warn('[outbox] Failed to update ENS mailbox pointers:', ensUpdateError)
+          }
+        }
+      }
+
+      const itemResults = new Map()
+      for (const [itemId, state] of itemStates.entries()) {
+        if (state.error || !state.senderEntry) {
+          itemResults.set(itemId, {
+            success: false,
+            errorMessage: state.error?.message ?? 'Failed to send message',
+          })
+        } else {
+          itemResults.set(itemId, {
+            success: true,
+            senderEntry: state.senderEntry,
+            recipientEntry: state.recipientEntry,
+            mailboxRoot: ownerRoots.get(state.senderEns) ?? null,
+          })
+        }
+      }
 
       return {
-        senderEntry: senderMailboxUpdate.entry,
-        recipientEntry: item.isSelfRecipient ? recipientMailboxUpdate.entry : null,
-        mailboxRoot: senderMailboxUpdate.mailboxRoot,
+        itemResults,
+        ownerRoots,
       }
     },
-    [
-      ensureIdentityMaterial,
-      ensureProvider,
-      ensName,
-      getEnsProvider,
-      walletAddress,
-    ]
+    [ensureIdentityMaterial, ensureProvider, ensName, getEnsProvider, walletAddress]
   )
 
   const processOutboxQueue = useCallback(async () => {
@@ -1761,62 +1801,74 @@ function App() {
       releaseOutboxLock()
       return
     }
-    const nextItem = storedItems.find(
+    const pendingItems = storedItems.filter(
       (item) => item.status === 'pending' || item.status === 'error'
     )
-    if (!nextItem) {
+    if (pendingItems.length === 0) {
       releaseOutboxLock()
       return
     }
     outboxProcessingRef.current = true
-    patchOutboxItem(nextItem.id, { status: 'sending', errorMessage: null })
+    pendingItems.forEach((item) => {
+      patchOutboxItem(item.id, { status: 'sending', errorMessage: null })
+    })
     refreshOutboxLock()
     try {
-      console.log('[outbox] Processing queued email', {
-        id: nextItem.id,
-        messageId: nextItem.metadata?.messageId,
-        to: nextItem.recipientEns,
+      setStatusMessage(`Delivering ${pendingItems.length} queued email(s)...`)
+      const delivery = await deliverOutboxBatch(pendingItems)
+      pendingItems.forEach((item) => {
+        const result = delivery.itemResults.get(item.id)
+        if (result?.success) {
+          removeOutboxItem(item.id)
+          if (result.senderEntry) {
+            setSentEntries((prev) => {
+              const filtered = (prev ?? []).filter(
+                (entry) => entry.messageId !== result.senderEntry?.messageId
+              )
+              return [result.senderEntry, ...filtered]
+            })
+          }
+          if (item.isSelfRecipient && result.recipientEntry) {
+            setMailboxEntries((prev) => {
+              const filtered = (prev ?? []).filter(
+                (entry) => entry.messageId !== result.recipientEntry?.messageId
+              )
+              return [result.recipientEntry, ...filtered]
+            })
+          }
+        } else {
+          patchOutboxItem(item.id, {
+            status: 'error',
+            errorMessage: result?.errorMessage ?? 'Failed to send message',
+          })
+        }
       })
-      setStatusMessage('Uploading queued email to Filecoin storage...')
-      const result = await deliverOutboxItem(nextItem)
-      removeOutboxItem(nextItem.id)
-      console.log('[outbox] ✓ Delivered queued email', {
-        id: nextItem.id,
-        messageId: result?.senderEntry?.messageId ?? nextItem.metadata?.messageId,
-        to: nextItem.recipientEns,
-      })
-      if (result?.senderEntry) {
-        setSentEntries((prev) => {
-          const filtered = (prev ?? []).filter(
-            (entry) => entry.messageId !== result.senderEntry?.messageId
-          )
-          return [result.senderEntry, ...filtered]
-        })
+      const selfOwnerEns =
+        ensName ?? pendingItems.find((item) => item.senderEns)?.senderEns ?? null
+      if (selfOwnerEns) {
+        const latestRoot = delivery.ownerRoots.get(selfOwnerEns)
+        if (latestRoot) {
+          mailboxRootRef.current = latestRoot
+          setMailboxRoot(latestRoot)
+        }
       }
-      if (nextItem.isSelfRecipient && result?.recipientEntry) {
-        setMailboxEntries((prev) => {
-          const filtered = (prev ?? []).filter(
-            (entry) => entry.messageId !== result.recipientEntry?.messageId
-          )
-          return [result.recipientEntry, ...filtered]
-        })
-      }
-      if (result?.mailboxRoot) {
-        setMailboxRoot(result.mailboxRoot)
-      }
-      setStatusMessage('Queued email delivered successfully')
+      setStatusMessage('Queued emails delivered successfully')
     } catch (error) {
-      console.error('[outbox] Failed to deliver queued email:', error)
-      patchOutboxItem(nextItem.id, {
-        status: 'error',
-        errorMessage: error.message ?? 'Failed to send message',
+      console.error('[outbox] Failed to deliver queued emails:', error)
+      pendingItems.forEach((item) => {
+        patchOutboxItem(item.id, {
+          status: 'error',
+          errorMessage: error.message ?? 'Failed to send message',
+        })
       })
+      setStatusMessage('Failed to deliver queued emails. Please retry.')
     } finally {
       releaseOutboxLock()
       outboxProcessingRef.current = false
     }
   }, [
-    deliverOutboxItem,
+    deliverOutboxBatch,
+    ensName,
     patchOutboxItem,
     refreshOutboxLock,
     releaseOutboxLock,

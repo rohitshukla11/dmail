@@ -1,9 +1,20 @@
 // dMail v2 update: extend mailbox helpers with append-only index utilities.
-import { synapseFetch, synapseUpload, normalizeServiceUrl, getStorageServiceUrl, setStorageServiceUrl } from './synapse.js'
+import {
+  synapseFetch,
+  synapseUpload,
+  normalizeServiceUrl,
+  getStorageServiceUrl,
+  setStorageServiceUrl,
+} from './synapse.js'
 import {
   resolveMailboxRoot as resolveMailboxRootFromResolver,
   updateResolverMailboxRoot,
 } from './resolver.js'
+
+const MAILBOX_ROOT_VERSION = 3
+const MAX_SEGMENT_ENTRIES = 50
+const SEGMENT_FILENAME_PREFIX = 'mailbox-segment'
+const ROOT_FILENAME = 'mailbox-root'
 
 let synapseFetchImpl = synapseFetch
 let synapseUploadImpl = synapseUpload
@@ -79,6 +90,446 @@ function ensureProviderInfo(uploadResult) {
     return baseInfo
   }
   return null
+}
+
+function cloneUploadResult(uploadResult) {
+  if (!uploadResult) return null
+  return JSON.parse(JSON.stringify(uploadResult))
+}
+
+function ensureArray(value) {
+  return Array.isArray(value) ? value : []
+}
+
+function getSegmentsKey(type) {
+  return type === 'sent' ? 'sentSegments' : 'inboxSegments'
+}
+
+function createEmptyMailboxRootDocument(ownerEns) {
+  return {
+    owner: ownerEns ?? null,
+    version: MAILBOX_ROOT_VERSION,
+    inboxSegments: [],
+    sentSegments: [],
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function generateSegmentId(type) {
+  const suffix = Math.floor(Math.random() * 1e9)
+  return `${type}-segment-${Date.now()}-${suffix}`
+}
+
+function createSegmentDocument({ owner, type, segmentId, entries = [] }) {
+  return {
+    owner: owner ?? null,
+    type,
+    version: 1,
+    segmentId: segmentId ?? generateSegmentId(type),
+    entries: ensureArray(entries),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function getSegmentEntries(segmentDoc) {
+  if (!segmentDoc) return []
+  return Array.isArray(segmentDoc.entries) ? segmentDoc.entries : []
+}
+
+function buildSegmentPointerFromUpload(uploadResult, segmentDoc) {
+  if (!uploadResult?.cid) {
+    throw new Error('Segment upload result with cid is required')
+  }
+  if (!uploadResult?.pieceCid) {
+    throw new Error('Segment upload result must include pieceCid')
+  }
+  return {
+    id: segmentDoc.segmentId,
+    cid: uploadResult.cid,
+    pieceCid: uploadResult.pieceCid,
+    providerInfo: ensureProviderInfo(uploadResult),
+    entryCount: getSegmentEntries(segmentDoc).length,
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function normalizeSegmentPointer(pointer) {
+  if (!pointer) return null
+  if (!pointer.id) {
+    return {
+      ...pointer,
+      id: generateSegmentId(pointer.type ?? 'segment'),
+    }
+  }
+  return pointer
+}
+
+function getRootPointerFromMailboxRoot(mailboxRoot) {
+  if (!mailboxRoot) return null
+  const pointer = mailboxRoot.inbox ?? mailboxRoot.sent ?? null
+  return normalizeUploadResult(pointer)
+}
+
+function isSegmentedRoot(mailboxRoot) {
+  return mailboxRoot?.version >= MAILBOX_ROOT_VERSION
+}
+
+function chunkEntries(entries, chunkSize = MAX_SEGMENT_ENTRIES) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return []
+  }
+  const chunks = []
+  for (let i = 0; i < entries.length; i += chunkSize) {
+    chunks.push(entries.slice(i, i + chunkSize))
+  }
+  return chunks
+}
+
+async function loadMailboxRootDocument(pointer, options = {}) {
+  if (!pointer?.cid) {
+    return createEmptyMailboxRootDocument(options.owner)
+  }
+  const providerInfo = pointer.providerInfo ?? ensureProviderInfo(pointer)
+  const normalizedProvider = providerInfo
+    ? setStorageServiceUrl(providerInfo, normalizeServiceUrl(getStorageServiceUrl(providerInfo)))
+    : null
+  const rootDoc = await synapseFetchImpl(pointer.cid, {
+    as: 'json',
+    pieceCid: pointer.pieceCid,
+    providerInfo: normalizedProvider ?? undefined,
+    ...options,
+  })
+  if (!rootDoc || typeof rootDoc !== 'object') {
+    throw new Error('Mailbox root payload is not a valid object')
+  }
+  rootDoc.inboxSegments = ensureArray(rootDoc.inboxSegments)
+  rootDoc.sentSegments = ensureArray(rootDoc.sentSegments)
+  rootDoc.version = MAILBOX_ROOT_VERSION
+  return rootDoc
+}
+
+async function persistMailboxRootDocument(rootDoc, options = {}) {
+  const payload = JSON.stringify(rootDoc, null, 2)
+  return synapseUploadImpl(payload, {
+    filename: `${ROOT_FILENAME}.json`,
+    metadata: {
+      type: 'dmail-mailbox-root',
+      owner: rootDoc.owner ?? options.owner ?? 'unknown',
+    },
+    ...(options.uploadOptions ?? {}),
+  })
+}
+
+async function loadMailboxSegment(segmentPointer, options = {}) {
+  if (!segmentPointer?.cid) return null
+  const providerInfo =
+    segmentPointer.providerInfo ??
+    ensureProviderInfo({
+      providerInfo: segmentPointer.providerInfo,
+      serviceURL: segmentPointer.serviceURL,
+      providerId: segmentPointer.providerId,
+      providerAddress: segmentPointer.providerAddress,
+    })
+  const normalizedProvider = providerInfo
+    ? setStorageServiceUrl(providerInfo, normalizeServiceUrl(getStorageServiceUrl(providerInfo)))
+    : null
+  const segment = await synapseFetchImpl(segmentPointer.cid, {
+    as: 'json',
+    pieceCid: segmentPointer.pieceCid,
+    providerInfo: normalizedProvider ?? undefined,
+    ...options,
+  })
+  if (!segment) {
+    return null
+  }
+  segment.entries = ensureArray(segment.entries)
+  if (!segment.segmentId) {
+    segment.segmentId = segmentPointer.id ?? generateSegmentId(segment.type ?? 'inbox')
+  }
+  return segment
+}
+
+async function persistMailboxSegment(segmentDoc, options = {}) {
+  const payload = JSON.stringify(segmentDoc, null, 2)
+  return synapseUploadImpl(payload, {
+    filename: `${SEGMENT_FILENAME_PREFIX}-${segmentDoc.type}-${segmentDoc.segmentId}.json`,
+    metadata: {
+      type: `dmail-mailbox-segment-${segmentDoc.type}`,
+      owner: segmentDoc.owner ?? options.owner ?? 'unknown',
+      segmentId: segmentDoc.segmentId,
+    },
+    ...(options.uploadOptions ?? {}),
+  })
+}
+
+async function convertLegacyMailboxToSegmented({
+  ownerEns,
+  mailboxRoot,
+  loadOptions,
+  persistOptions,
+}) {
+  const normalizedRoot = normalizeMailboxRoot(mailboxRoot, { owner: ownerEns })
+  const rootDoc = createEmptyMailboxRootDocument(ownerEns)
+  let hasLegacyData = false
+
+  for (const folder of ['inbox', 'sent']) {
+    const pointer = getMailboxIndexPointer(normalizedRoot, folder)
+    if (!pointer?.cid) continue
+    const mailbox = await loadMailboxFromCid(pointer, { optional: true, ...(loadOptions ?? {}) })
+    const entries = getMailboxEntries(mailbox)
+    if (!entries.length) continue
+    hasLegacyData = true
+    const chunks = chunkEntries(entries, MAX_SEGMENT_ENTRIES)
+    for (const chunk of chunks) {
+      const segmentDoc = createSegmentDocument({
+        owner: ownerEns,
+        type: folder,
+        entries: chunk,
+        segmentId: generateSegmentId(folder),
+      })
+      const uploadResult = await persistMailboxSegment(segmentDoc, {
+        owner: ownerEns,
+        type: folder,
+        ...(persistOptions ?? {}),
+      })
+      rootDoc[getSegmentsKey(folder)].push(buildSegmentPointerFromUpload(uploadResult, segmentDoc))
+    }
+  }
+
+  let nextRoot = {
+    owner: ownerEns ?? null,
+    version: MAILBOX_ROOT_VERSION,
+    inbox: null,
+    sent: null,
+  }
+
+  if (hasLegacyData) {
+    const rootUpload = await persistMailboxRootDocument(rootDoc, { owner: ownerEns })
+    const pointer = normalizeUploadResult(rootUpload)
+    nextRoot = {
+      owner: ownerEns ?? null,
+      version: MAILBOX_ROOT_VERSION,
+      inbox: pointer ? cloneUploadResult(pointer) : null,
+      sent: pointer ? cloneUploadResult(pointer) : null,
+    }
+  }
+
+  return { mailboxRoot: nextRoot, rootDoc }
+}
+
+async function ensureSegmentedRootDocument({
+  ownerEns,
+  mailboxRoot,
+  loadOptions,
+  persistOptions,
+}) {
+  if (!mailboxRoot || !isSegmentedRoot(mailboxRoot)) {
+    return convertLegacyMailboxToSegmented({
+      ownerEns,
+      mailboxRoot,
+      loadOptions,
+      persistOptions,
+    })
+  }
+
+  const pointer = getRootPointerFromMailboxRoot(mailboxRoot)
+  if (pointer?.cid) {
+    const rootDoc = await loadMailboxRootDocument(pointer, {
+      ...(loadOptions ?? {}),
+      owner: ownerEns,
+    })
+    return {
+      mailboxRoot,
+      rootDoc,
+    }
+  }
+
+  return {
+    mailboxRoot,
+    rootDoc: createEmptyMailboxRootDocument(ownerEns),
+  }
+}
+
+async function appendEntriesToSegments({
+  ownerEns,
+  rootDoc,
+  type,
+  items,
+  persistOptions,
+  loadOptions,
+}) {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error('appendEntriesToSegments: items array is required')
+  }
+
+  const segmentsKey = getSegmentsKey(type)
+  if (!Array.isArray(rootDoc[segmentsKey])) {
+    rootDoc[segmentsKey] = []
+  }
+  const segments = rootDoc[segmentsKey]
+  const dirtySegments = new Map()
+  const segmentCache = new Map()
+  let activeSegmentState = null
+
+  async function getWritableSegmentState() {
+    if (activeSegmentState) {
+      const currentCount = getSegmentEntries(activeSegmentState.doc).length
+      if (currentCount < MAX_SEGMENT_ENTRIES) {
+        return activeSegmentState
+      }
+      dirtySegments.set(activeSegmentState.doc.segmentId, activeSegmentState)
+      activeSegmentState = null
+    }
+
+    const lastIndex = segments.length - 1
+    const lastPointer = lastIndex >= 0 ? segments[lastIndex] : null
+    if (lastPointer && !lastPointer.pending) {
+      const cacheKey = lastPointer.id ?? `segment-${lastIndex}`
+      if (!segmentCache.has(cacheKey)) {
+        const doc = await loadMailboxSegment(lastPointer, {
+          optional: true,
+          ...(loadOptions ?? {}),
+        })
+        if (doc) {
+          segmentCache.set(cacheKey, { doc, pointerIndex: lastIndex, pointer: lastPointer })
+        }
+      }
+      const cachedState = segmentCache.get(cacheKey)
+      if (cachedState && getSegmentEntries(cachedState.doc).length < MAX_SEGMENT_ENTRIES) {
+        activeSegmentState = cachedState
+        return cachedState
+      }
+    }
+
+    const newDoc = createSegmentDocument({
+      owner: ownerEns,
+      type,
+      segmentId: generateSegmentId(type),
+    })
+    const placeholderPointer = {
+      id: newDoc.segmentId,
+      cid: null,
+      pieceCid: null,
+      providerInfo: null,
+      entryCount: 0,
+      pending: true,
+    }
+    segments.push(placeholderPointer)
+    const newState = {
+      doc: newDoc,
+      pointerIndex: segments.length - 1,
+      pointer: placeholderPointer,
+    }
+    segmentCache.set(newDoc.segmentId, newState)
+    activeSegmentState = newState
+    return newState
+  }
+
+  const appendedEntries = []
+
+  for (const item of items) {
+    let segmentState = await getWritableSegmentState()
+    if (!segmentState) {
+      throw new Error('Failed to allocate mailbox segment for append operation')
+    }
+    const segmentEntries = [...getSegmentEntries(segmentState.doc)]
+    const entryMetadata = {
+      ...item.metadata,
+      folder: item.metadata?.folder ?? type,
+    }
+    const nextSegmentMailbox = appendEmailEntry({ entries: segmentEntries }, item.uploads, entryMetadata)
+    segmentState.doc.entries = nextSegmentMailbox.entries
+    segmentState.doc.updatedAt = new Date().toISOString()
+    const appendedEntry = nextSegmentMailbox.entries[nextSegmentMailbox.entries.length - 1] ?? null
+    appendedEntries.push({
+      entry: appendedEntry,
+      itemId: item.id ?? null,
+    })
+    dirtySegments.set(segmentState.doc.segmentId, segmentState)
+    const currentCount = getSegmentEntries(segmentState.doc).length
+    if (currentCount >= MAX_SEGMENT_ENTRIES) {
+      activeSegmentState = null
+    }
+  }
+
+  const segmentUploads = []
+  for (const state of dirtySegments.values()) {
+    const uploadResult = await persistMailboxSegment(state.doc, {
+      owner: ownerEns,
+      type,
+      ...(persistOptions ?? {}),
+    })
+    const pointer = segments[state.pointerIndex]
+    pointer.cid = uploadResult.cid
+    pointer.pieceCid = uploadResult.pieceCid
+    pointer.providerInfo = ensureProviderInfo(uploadResult)
+    pointer.entryCount = getSegmentEntries(state.doc).length
+    delete pointer.pending
+    segmentUploads.push({
+      pointer,
+      uploadResult,
+    })
+  }
+
+  rootDoc.updatedAt = new Date().toISOString()
+
+  return {
+    appendedEntries,
+    segmentUploads,
+  }
+}
+
+export async function appendMailboxEntriesBatch({
+  ownerEns,
+  mailboxRoot,
+  items,
+  type = 'inbox',
+  loadOptions,
+  persistOptions,
+}) {
+  if (!ownerEns) {
+    throw new Error('appendMailboxEntriesBatch: ownerEns is required')
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error('appendMailboxEntriesBatch: items array is required')
+  }
+
+  const { mailboxRoot: baselineRoot, rootDoc } = await ensureSegmentedRootDocument({
+    ownerEns,
+    mailboxRoot,
+    loadOptions,
+    persistOptions,
+  })
+
+  const appendResult = await appendEntriesToSegments({
+    ownerEns,
+    rootDoc,
+    type,
+    items,
+    persistOptions,
+    loadOptions,
+  })
+
+  const rootUpload = await persistMailboxRootDocument(rootDoc, {
+    owner: ownerEns,
+    ...(persistOptions ?? {}),
+  })
+  const normalizedPointer = normalizeUploadResult(rootUpload)
+  const inboxPointer = normalizedPointer ? cloneUploadResult(normalizedPointer) : null
+  const sentPointer = normalizedPointer ? cloneUploadResult(normalizedPointer) : null
+  const nextRoot = {
+    owner: baselineRoot?.owner ?? ownerEns ?? null,
+    version: MAILBOX_ROOT_VERSION,
+    inbox: inboxPointer,
+    sent: sentPointer,
+  }
+
+  return {
+    entries: appendResult.appendedEntries.map((item) => item.entry),
+    mailboxRoot: nextRoot,
+    rootUploadResult: rootUpload,
+    segmentUploads: appendResult.segmentUploads.map((segment) => segment.uploadResult),
+  }
 }
 
 export function appendEmailEntry(mailbox, uploads, metadata = {}) {
@@ -335,23 +786,61 @@ export function getMailboxEntries(mailbox) {
 }
 
 export async function fetchMailboxIndex(ownerEns, mailboxRoot, type = 'inbox', options = {}) {
-  const pointer = getMailboxIndexPointer(mailboxRoot, type)
+  const normalizedRoot = normalizeMailboxRoot(mailboxRoot, { owner: ownerEns })
   const loadOptions = options.loadOptions ?? {}
 
   if (options.mailbox) {
     return {
       mailbox: options.mailbox,
-      pointer,
-      isNew: !pointer,
+      pointer: getMailboxIndexPointer(normalizedRoot, type),
+      isNew: !getMailboxIndexPointer(normalizedRoot, type),
     }
   }
 
-  if (pointer?.cid) {
-    const mailbox = await loadMailboxFromCid(pointer, { optional: true, ...loadOptions })
+  if (isSegmentedRoot(normalizedRoot)) {
+    const rootPointer = getRootPointerFromMailboxRoot(normalizedRoot)
+    if (rootPointer?.cid) {
+      const rootDoc = await loadMailboxRootDocument(rootPointer, {
+        ...loadOptions,
+        owner: ownerEns,
+      })
+      const segmentsKey = getSegmentsKey(type)
+      const segmentPointers = ensureArray(rootDoc[segmentsKey])
+      const entries = []
+      for (const segmentPointer of segmentPointers) {
+        const segmentDoc = await loadMailboxSegment(segmentPointer, {
+          optional: true,
+          ...loadOptions,
+        })
+        if (segmentDoc) {
+          entries.push(...getSegmentEntries(segmentDoc))
+        }
+      }
+      return {
+        mailbox: {
+          owner: ownerEns ?? rootDoc.owner ?? null,
+          type,
+          version: rootDoc.version ?? MAILBOX_ROOT_VERSION,
+          entries,
+        },
+        pointer: rootPointer,
+        isNew: segmentPointers.length === 0,
+      }
+    }
+    return {
+      mailbox: createEmptyMailbox(ownerEns, type),
+      pointer: rootPointer,
+      isNew: true,
+    }
+  }
+
+  const legacyPointer = getMailboxIndexPointer(normalizedRoot, type)
+  if (legacyPointer?.cid) {
+    const mailbox = await loadMailboxFromCid(legacyPointer, { optional: true, ...loadOptions })
     if (mailbox) {
       return {
         mailbox,
-        pointer,
+        pointer: legacyPointer,
         isNew: false,
       }
     }
@@ -376,28 +865,19 @@ export async function appendMailboxIndexEntry({
   if (!ownerEns) {
     throw new Error('appendMailboxIndexEntry: ownerEns is required')
   }
-  const { mailbox } = await fetchMailboxIndex(ownerEns, mailboxRoot, type, {
-    loadOptions,
-  })
-  const entryMetadata = {
-    ...metadata,
-    folder: metadata.folder ?? type,
-  }
-  const nextMailbox = appendEmailEntry(mailbox, uploads, entryMetadata)
-  const uploadResult = await persistMailbox(nextMailbox, {
-    owner: ownerEns,
+  const batchResult = await appendMailboxEntriesBatch({
+    ownerEns,
+    mailboxRoot,
+    items: [{ uploads, metadata }],
     type,
-    ...(persistOptions ?? {}),
+    loadOptions,
+    persistOptions,
   })
-  const nextRoot = mergeMailboxRoot(mailboxRoot, type, uploadResult, { owner: ownerEns })
-  const entries = getMailboxEntries(nextMailbox)
-  const appendedEntry = entries[entries.length - 1] ?? null
-
   return {
-    mailbox: nextMailbox,
-    uploadResult,
-    mailboxRoot: nextRoot,
-    entry: appendedEntry,
+    mailbox: null,
+    uploadResult: batchResult.segmentUploads[batchResult.segmentUploads.length - 1] ?? null,
+    mailboxRoot: batchResult.mailboxRoot,
+    entry: batchResult.entries[batchResult.entries.length - 1] ?? null,
   }
 }
 
@@ -437,11 +917,45 @@ async function appendMailboxEntryAndSyncResolver({
   return result
 }
 
+async function appendMailboxEntriesBatchAndSyncResolver({
+  ownerEns,
+  mailboxRoot,
+  items,
+  type = 'inbox',
+  loadOptions,
+  persistOptions,
+  resolveOptions,
+  resolverOptions,
+  skipResolverUpdate = false,
+}) {
+  const baselineRoot = await resolveMailboxRootForOwner(ownerEns, mailboxRoot, resolveOptions)
+  const result = await appendMailboxEntriesBatch({
+    ownerEns,
+    mailboxRoot: baselineRoot,
+    items,
+    type,
+    loadOptions,
+    persistOptions,
+  })
+  if (!skipResolverUpdate) {
+    await updateResolverMailboxRootImpl(ownerEns, result.mailboxRoot, resolverOptions)
+  }
+  return result
+}
+
 export async function appendInboxEntry(options) {
   return appendMailboxEntryAndSyncResolver({ ...options, type: 'inbox' })
 }
 
 export async function appendSentEntry(options) {
   return appendMailboxEntryAndSyncResolver({ ...options, type: 'sent' })
+}
+
+export async function appendInboxEntriesBatch(options) {
+  return appendMailboxEntriesBatchAndSyncResolver({ ...options, type: 'inbox' })
+}
+
+export async function appendSentEntriesBatch(options) {
+  return appendMailboxEntriesBatchAndSyncResolver({ ...options, type: 'sent' })
 }
 
