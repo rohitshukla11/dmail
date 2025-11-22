@@ -808,31 +808,29 @@ export async function decryptEmail(encryptedPayload, keyMaterial, options = {}) 
   }
 
   const material = normalizeKeyMaterial(keyMaterial)
+  
+  // Find the v2 envelope
   const candidateEnvelope =
     encryptedPayload?.ciphertext && encryptedPayload?.version
       ? encryptedPayload
       : encryptedPayload?.recipientEnvelope ?? encryptedPayload?.senderEnvelope ?? null
 
   if (!candidateEnvelope) {
-    throw new Error('decryptEmail: No valid envelope found in encrypted payload')
+    throw new Error('decryptEmail: No valid v2 envelope found in encrypted payload. Expected structure with recipientEnvelope/senderEnvelope or single envelope with ciphertext and version.')
   }
 
-  // Check for v2 envelope: version >= 2 OR has ephemeralPublicKey (v2-specific field)
+  // Verify it's a v2 envelope: version >= 2 OR has ephemeralPublicKey (v2-specific field)
   const hasV2Version = candidateEnvelope?.version != null && 
                         Number(candidateEnvelope.version) >= EMAIL_V2_VERSION
   const hasV2Structure = candidateEnvelope?.ephemeralPublicKey != null || 
                          (candidateEnvelope?.ciphertext && !candidateEnvelope?.encryptedSubject)
   const isV2 = (hasV2Version || hasV2Structure) && candidateEnvelope?.ciphertext
 
-  if (isV2) {
-    return await decryptEmailV2(candidateEnvelope, material, options)
+  if (!isV2) {
+    throw new Error('decryptEmail: Only v2 email format is supported. Expected envelope with version >= 2 and ciphertext.')
   }
 
-  const legacyKey = material.legacyPrivateKey ?? material.identityPrivateKey ?? keyMaterial
-  if (!legacyKey) {
-    throw new Error('decryptEmail: private key is required to decrypt this payload')
-  }
-  return await decryptEmailLegacy(encryptedPayload, legacyKey, options)
+  return await decryptEmailV2(candidateEnvelope, material, options)
 }
 
 async function decryptEmailV2(encryptedEnvelope, keyMaterial, options = {}) {

@@ -14,6 +14,7 @@ import {
   appendCalendarEvent,
   loadCalendarFromCid as loadCalendarFromCidFile,
   persistCalendar,
+  setMailboxUploadResult,
   getCalendarUploadResult,
   setCalendarUploadResult,
   generateCalendarIcs,
@@ -26,6 +27,8 @@ import {
   verifyEnvelopeSignature,
   getMailboxEntries,
   ensureRegisteredIdentity,
+  normalizeServiceUrl,
+  setStorageServiceUrl,
 } from '@dmail/core'
 
 import CalendarSidebar from './components/calendar/CalendarSidebar'
@@ -33,6 +36,31 @@ import EventModal from './components/calendar/EventModal'
 
 import './App.css'
 import { clearIdentityCache, getOrCreateIdentityCached } from './utils/identityCache'
+
+const IDENTITY_REGISTRATION_CACHE_KEY = 'dmail_registered_identity_cache'
+
+function readIdentityRegistrationCache() {
+  if (typeof window === 'undefined') return {}
+  const storage = window.localStorage
+  try {
+    const raw = storage.getItem(IDENTITY_REGISTRATION_CACHE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return typeof parsed === 'object' && parsed ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeIdentityRegistrationCache(cache) {
+  if (typeof window === 'undefined') return
+  const storage = window.localStorage
+  try {
+    storage.setItem(IDENTITY_REGISTRATION_CACHE_KEY, JSON.stringify(cache))
+  } catch (error) {
+    console.warn('Failed to persist identity registration cache', error)
+  }
+}
 
 const FALLBACK_SEPOLIA_RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com'
 const SEPOLIA_CHAIN_ID_HEX = '0xaa36a7'
@@ -62,8 +90,14 @@ function App() {
   const [identityPublicKey, setIdentityPublicKey] = useState(null)
   const [mailboxUploadResult, setMailboxUploadResultState] = useState(null)
   const [mailboxRoot, setMailboxRoot] = useState(null)
+  const mailboxRootRef = useRef(null)
   const [mailboxEntries, setMailboxEntries] = useState([])
   const [sentEntries, setSentEntries] = useState([])
+  
+  // Keep ref in sync with state
+  useEffect(() => {
+    mailboxRootRef.current = mailboxRoot
+  }, [mailboxRoot])
   const [loadingInbox, setLoadingInbox] = useState(false)
   const [selectedEmail, setSelectedEmail] = useState(null)
   const [sending, setSending] = useState(false)
@@ -83,6 +117,7 @@ function App() {
   })
   const [calendarEvents, setCalendarEvents] = useState([])
   const [calendarUploadResult, setCalendarUploadResultState] = useState(null)
+  const calendarUploadResultRef = useRef(null)
   const [calendarLoading, setCalendarLoading] = useState(false)
   const [calendarError, setCalendarError] = useState('')
   const [showEventModal, setShowEventModal] = useState(false)
@@ -91,6 +126,12 @@ function App() {
   const [identityStatusMessage, setIdentityStatusMessage] = useState('')
   const identityMaterialRef = useRef(null)
   const identityEnsRef = useRef(null)
+  const identityRegistrationCacheRef = useRef(readIdentityRegistrationCache())
+  
+  // Keep calendar upload result ref in sync with state
+  useEffect(() => {
+    calendarUploadResultRef.current = calendarUploadResult
+  }, [calendarUploadResult])
 
   const evaluateEntrySignature = useCallback(
     (entry) => {
@@ -220,9 +261,25 @@ function App() {
     [getEnsProvider]
   )
 
+  const markIdentityRegistered = useCallback((identifier, publicKey) => {
+    if (!identifier || !publicKey) return
+    identityRegistrationCacheRef.current = identityRegistrationCacheRef.current ?? {}
+    if (identityRegistrationCacheRef.current[identifier] === publicKey) return
+    identityRegistrationCacheRef.current[identifier] = publicKey
+    writeIdentityRegistrationCache(identityRegistrationCacheRef.current)
+  }, [])
+
+  const isIdentityRegisteredInSession = useCallback((identifier, publicKey) => {
+    if (!identifier || !publicKey) return false
+    return identityRegistrationCacheRef.current?.[identifier] === publicKey
+  }, [])
+
   const ensureRegisteredIdentityIfNeeded = useCallback(
     async (targetEns, derivedIdentity, signer) => {
       if (!targetEns || !derivedIdentity?.x25519PublicBase64 || !targetEns.endsWith('.eth')) {
+        return false
+      }
+      if (isIdentityRegisteredInSession(targetEns, derivedIdentity.x25519PublicBase64)) {
         return false
       }
       try {
@@ -234,6 +291,7 @@ function App() {
               ensName: targetEns,
             })
             if (existing === derivedIdentity.x25519PublicBase64) {
+              markIdentityRegistered(targetEns, derivedIdentity.x25519PublicBase64)
               return false
             }
           } catch (lookupError) {
@@ -241,13 +299,14 @@ function App() {
           }
         }
         await ensureRegisteredIdentity(targetEns, derivedIdentity.x25519PublicBase64, signer)
+        markIdentityRegistered(targetEns, derivedIdentity.x25519PublicBase64)
         return true
       } catch (registrationError) {
         console.warn('Failed to register identity with resolver', registrationError)
         throw registrationError
       }
     },
-    [getEnsProvider]
+    [getEnsProvider, isIdentityRegisteredInSession, markIdentityRegistered]
   )
 
   const deriveIdentityMaterial = useCallback(
@@ -285,7 +344,9 @@ function App() {
         }
         identityEnsRef.current = targetIdentifier
         setIdentityPublicKey(derived.x25519PublicBase64)
-        if (targetIdentifier) {
+        if (targetIdentifier && isIdentityRegisteredInSession(targetIdentifier, derived.x25519PublicBase64)) {
+          setIdentityStatusMessage('Identity already registered for this session.')
+        } else if (targetIdentifier) {
           try {
             setIdentityStatusMessage('Checking resolver registration...')
             const registered = await ensureRegisteredIdentityIfNeeded(
@@ -315,7 +376,7 @@ function App() {
         setIdentityDeriving(false)
       }
     },
-    [walletAddress, ensName, ensureProvider, ensureRegisteredIdentityIfNeeded]
+    [walletAddress, ensName, ensureProvider, ensureRegisteredIdentityIfNeeded, isIdentityRegisteredInSession]
   )
 
   const ensureIdentityMaterial = useCallback(
@@ -490,14 +551,28 @@ function App() {
       const targetEns =
         ensName ?? (walletAddress ? await ensProvider.lookupAddress(walletAddress) : null)
       const ownerIdentifier = targetEns ?? walletAddress
+      
+      // Fetch mailbox root from ENS
       const mailboxRootResponse = await resolveMailboxRoot(ownerIdentifier, {
         provider: ensProvider,
       })
       const normalizedRoot = normalizeMailboxRoot(mailboxRootResponse, { owner: ownerIdentifier })
+      
+      console.log('[refreshInbox] Fetched mailbox root from ENS:', {
+        owner: ownerIdentifier,
+        normalizedRoot,
+      })
+      
       setMailboxRoot(normalizedRoot)
 
       const inboxPointer = getMailboxIndexPointer(normalizedRoot, 'inbox')
       const sentPointer = getMailboxIndexPointer(normalizedRoot, 'sent')
+      
+      console.log('[refreshInbox] Mailbox pointers:', {
+        inboxCid: inboxPointer?.cid,
+        sentCid: sentPointer?.cid,
+      })
+      
       setMailboxUploadResultState(inboxPointer ?? null)
 
       if (!inboxPointer?.cid && !sentPointer?.cid) {
@@ -520,6 +595,16 @@ function App() {
       const sentEntriesList = annotateEntriesWithSignature(
         getMailboxEntries(sentMailbox).filter((entry) => entry.cidSender)
       )
+      
+      console.log('[refreshInbox] Loaded entries:', {
+        inboxCount: inboxEntriesList.length,
+        sentCount: sentEntriesList.length,
+        inboxCids: inboxEntriesList.map(e => ({ cid: e.cid, subject: e.subjectPreview, timestamp: e.timestamp })),
+        sentCids: sentEntriesList.map(e => ({ cid: e.cid, subject: e.subjectPreview, timestamp: e.timestamp })),
+        mailboxRoot: normalizedRoot,
+      })
+      
+      // Use only the loaded entries (no merging with old data)
       setMailboxEntries(inboxEntriesList)
       setSentEntries(sentEntriesList)
       const total =
@@ -549,13 +634,20 @@ function App() {
         return
       }
 
+      // Fetch calendar upload result from ENS
       const uploadResult = await getCalendarUploadResult(targetEns, { provider: ensProvider })
-      setCalendarUploadResultState(uploadResult ?? null)
 
       if (!uploadResult?.cid || !uploadResult?.pieceCid) {
+        console.log('[refreshCalendar] No calendar found in ENS')
         setCalendarEvents([])
+        setCalendarUploadResultState(null)
+        setStatusMessage('No calendar found. Create an event to start a new calendar.')
         return
       }
+
+      console.log('[refreshCalendar] Fetched calendar from ENS:', {
+        cid: uploadResult.cid,
+      })
 
       const calendar = await loadCalendarFromCidFile(uploadResult, { optional: true })
       setCalendarEvents(calendar?.events ?? [])
@@ -588,40 +680,92 @@ function App() {
       try {
         const folder = entry.folder ?? activeView ?? 'inbox'
         const isSentEntry = folder === 'sent'
-        const cid = isSentEntry ? entry.cidSender ?? entry.cid : entry.cid ?? entry.cidRecipient
-        const pieceCid = isSentEntry
-          ? entry.senderPieceCid ?? entry.pieceCid ?? entry.recipientPieceCid
-          : entry.pieceCid ?? entry.recipientPieceCid
-        const serviceURL = isSentEntry
-          ? entry.senderServiceURL ?? entry.serviceURL
-          : entry.serviceURL
-        const providerId = isSentEntry ? entry.senderProviderId ?? entry.providerId : entry.providerId
-        const providerAddress = isSentEntry
-          ? entry.senderProviderAddress ?? entry.providerAddress
-          : entry.providerAddress
+        
+        // For inbox: use recipient envelope (bodyCid/keyEnvelopesCid)
+        // For sent: use sender envelope (senderCopyCid/cidSender)
+        let cid, pieceCid, serviceURL, providerId, providerAddress
+        
+        if (isSentEntry) {
+          // Sent folder: use sender envelope
+          cid = entry.senderCopyCid ?? entry.cidSender ?? entry.cid
+          pieceCid = entry.senderPieceCid ?? entry.pieceCid
+          serviceURL = entry.senderServiceURL ?? entry.serviceURL
+          providerId = entry.senderProviderId ?? entry.providerId
+          providerAddress = entry.senderProviderAddress ?? entry.providerAddress
+        } else {
+          // Inbox: use recipient envelope
+          cid = entry.bodyCid ?? entry.keyEnvelopesCid ?? entry.cidRecipient ?? entry.cid
+          pieceCid = entry.recipientPieceCid ?? entry.pieceCid
+          serviceURL = entry.serviceURL
+          providerId = entry.providerId
+          providerAddress = entry.providerAddress
+        }
+
+        console.log('[openEmail] Fetching encrypted payload:', {
+          folder,
+          isSentEntry,
+          cid,
+          pieceCid,
+          bodyCid: entry.bodyCid,
+          keyEnvelopesCid: entry.keyEnvelopesCid,
+          senderCopyCid: entry.senderCopyCid,
+          cidSender: entry.cidSender,
+        })
 
         if (!cid || !pieceCid || !serviceURL) {
-          throw new Error('Email entry missing provider info. Cannot retrieve with Synapse-only mode.')
+          throw new Error(`Email entry missing provider info for ${isSentEntry ? 'sender' : 'recipient'} envelope. Cannot retrieve with Synapse-only mode.`)
         }
-        const providerInfo = {
+        
+        const baseInfo = {
           id: providerId,
           address: providerAddress,
-          products: {
-            PDP: {
-              data: {
-                serviceURL,
-              }
-            }
+          products: {},
+        }
+        const productKey = 'STORAGE'
+        baseInfo.products[productKey] = {
+          data: {
+            serviceURL: normalizeServiceUrl(serviceURL),
           }
         }
+        const providerInfo = baseInfo
+        
         const encryptedPayload = await synapseFetch(cid, {
           as: 'json',
           pieceCid,
           providerInfo
         })
+        
+        console.log('[openEmail] Encrypted payload structure:', {
+          keys: Object.keys(encryptedPayload),
+          hasRecipientEnvelope: !!encryptedPayload.recipientEnvelope,
+          hasSenderEnvelope: !!encryptedPayload.senderEnvelope,
+          hasVersion: !!encryptedPayload.version,
+          hasCiphertext: !!encryptedPayload.ciphertext,
+          hasEphemeralPublicKey: !!encryptedPayload.ephemeralPublicKey,
+          version: encryptedPayload.version,
+        })
+        
+        // The fetched payload should be a v2 envelope:
+        // 1. Full structure with recipientEnvelope/senderEnvelope (v2)
+        // 2. A single envelope with ciphertext + version (v2)
+        // decryptEmail will handle both formats automatically
+        const payloadToDecrypt = encryptedPayload
+        
+        if (!encryptedPayload.recipientEnvelope && !encryptedPayload.senderEnvelope && 
+            (!encryptedPayload.ciphertext || !encryptedPayload.version)) {
+          console.error('[openEmail] Invalid v2 payload structure:', {
+            payload: encryptedPayload,
+            hasCiphertext: !!encryptedPayload.ciphertext,
+            hasVersion: !!encryptedPayload.version,
+            keys: Object.keys(encryptedPayload),
+          })
+          throw new Error('Unable to decrypt: invalid v2 encrypted payload structure. Expected envelope with ciphertext and version, or structure with recipientEnvelope/senderEnvelope.')
+        }
+        
         // Decrypt email and fetch attachments from Synapse
+        console.log('[openEmail] Attempting decryption with key material...')
         const decrypted = await decryptEmail(
-          encryptedPayload,
+          payloadToDecrypt,
           {
             identityPrivateKey: identityMaterialRef.current?.privateKey ?? null,
             senderSecret: identityMaterialRef.current?.privateKey ?? null,
@@ -630,6 +774,11 @@ function App() {
             fetchAttachmentsFromSynapse: true,
           }
         )
+        console.log('[openEmail] Decryption successful:', {
+          hasSubject: !!decrypted.subject,
+          hasMessage: !!decrypted.message,
+          attachmentsCount: decrypted.attachments?.length ?? 0,
+        })
         let signatureValid = entry._signatureValid ?? null
         if (signatureValid === null && entry.signature && entry.signerPublicKey) {
           try {
@@ -784,15 +933,14 @@ function App() {
           throw new Error('ENS name not resolved for calendar')
         }
 
-        let calendarData = null
-        if (calendarUploadResult?.cid && calendarUploadResult?.pieceCid) {
-          calendarData = await loadCalendarFromCidFile(calendarUploadResult, { optional: true })
-        }
-        if (!calendarData) {
-          calendarData = createEmptyCalendar(ownerEns)
-        }
+        // Create a fresh calendar with only new events (ignore old calendar)
+        console.log('[handleSaveEvent] Creating fresh calendar')
+        const calendarData = createEmptyCalendar(ownerEns)
 
         const updatedCalendar = appendCalendarEvent(calendarData, eventInput)
+        console.log('[handleSaveEvent] Creating new calendar with event:', {
+          newEventCount: updatedCalendar.events.length,
+        })
         const uploadResult = await persistCalendar(updatedCalendar, {
           owner: ownerEns,
           uploadOptions: {
@@ -814,7 +962,7 @@ function App() {
         setSavingEvent(false)
       }
     },
-    [calendarUploadResult, ensName, ensureProvider, getEnsProvider, provider, walletAddress]
+    [calendarEvents, ensName, ensureProvider, getEnsProvider, provider, walletAddress]
   )
 
   const handleSend = useCallback(
@@ -824,7 +972,8 @@ function App() {
       setErrorMessage('')
       setStatusMessage('Encrypting email...')
       try {
-        await ensureProvider()
+        const browserProvider = await ensureProvider()
+        const signer = await browserProvider.getSigner()
         const ensProvider = await getEnsProvider()
         const senderEns =
           ensName ?? (walletAddress ? await ensProvider.lookupAddress(walletAddress) : null)
@@ -975,10 +1124,12 @@ function App() {
           senderCopyCid: signatureMetadata.senderCopyCid,
         }
 
-        setStatusMessage('Appending inbox index entry...')
+        setStatusMessage('Creating new mailbox on ENS...')
+        // Create a fresh mailbox with only this new email (ignore old mailbox)
+        const freshMailboxRoot = { owner: recipientEns, version: 2, inbox: null, sent: null }
         const recipientMailboxUpdate = await appendInboxEntry({
           ownerEns: recipientEns,
-          mailboxRoot: recipientMailboxRoot,
+          mailboxRoot: freshMailboxRoot, // Fresh mailbox, no old emails
           uploads: { recipient: recipientUpload, sender: senderUpload },
           metadata: entryMetadata,
           persistOptions: {
@@ -987,11 +1138,17 @@ function App() {
           resolveOptions: { provider: ensProvider },
           resolverOptions: { provider: ensProvider },
         })
+        
+        console.log('[sendEmail] New inbox mailbox created on ENS:', {
+          newCid: recipientMailboxUpdate.uploadResult?.cid,
+          mailboxRoot: recipientMailboxUpdate.mailboxRoot,
+        })
 
-        setStatusMessage('Appending sent index entry...')
+        setStatusMessage('Updating sent mailbox on ENS...')
+        // Use the fresh mailbox root from inbox update
         const senderMailboxUpdate = await appendSentEntry({
           ownerEns: senderEns,
-          mailboxRoot: senderMailboxRoot,
+          mailboxRoot: recipientMailboxUpdate.mailboxRoot, // Use fresh mailbox from above
           uploads: { recipient: recipientUpload, sender: senderUpload },
           metadata: { ...entryMetadata, folder: 'sent' },
           persistOptions: {
@@ -1000,23 +1157,37 @@ function App() {
           resolveOptions: { provider: ensProvider },
           resolverOptions: { provider: ensProvider },
         })
-        setMailboxRoot(senderMailboxUpdate.mailboxRoot)
+        
+        console.log('[sendEmail] Sent mailbox updated on ENS:', {
+          newCid: senderMailboxUpdate.uploadResult?.cid,
+          mailboxRoot: senderMailboxUpdate.mailboxRoot,
+        })
 
-        const appendUniqueEntry = (list, entry) => {
-          if (!entry) return list
-          const exists = list.some((item) => item.messageId === entry.messageId)
-          return exists ? list : [...list, entry]
+        // Update ENS mailbox pointer for the connected account to ensure refresh uses the new CID
+        const senderInboxPointer = getMailboxIndexPointer(senderMailboxUpdate.mailboxRoot, 'inbox')
+        if (senderInboxPointer?.cid) {
+          try {
+            await setMailboxUploadResult(senderEns, senderInboxPointer, {
+              provider: browserProvider,
+              signer,
+              wait: true,
+            })
+            console.log('[sendEmail] Updated ENS mailbox pointer:', senderInboxPointer.cid)
+          } catch (ensUpdateError) {
+            console.warn('[sendEmail] Failed to update ENS mailbox pointer:', ensUpdateError)
+          }
+        } else {
+          console.warn('[sendEmail] No inbox pointer available to persist on ENS')
         }
 
-        setMailboxEntries((prev) => appendUniqueEntry(prev, recipientMailboxUpdate.entry))
-        setSentEntries((prev) => appendUniqueEntry(prev, senderMailboxUpdate.entry))
-
-        setStatusMessage('Email sent successfully!')
+        setStatusMessage('Email sent successfully! Refreshing inbox...')
         updateCompose({ to: '', subject: '', message: '', recipientPublicKey: '', attachments: [] })
         setPubKeyFetchError(null)
         setShowManualPubKey(false)
         setFetchingPubKey(false)
         setShowCompose(false)
+        
+        // Refresh inbox to fetch updated mailbox from ENS
         await refreshInbox()
       } catch (error) {
         console.error(error)

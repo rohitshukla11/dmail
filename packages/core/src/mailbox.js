@@ -276,11 +276,13 @@ export function normalizeMailboxRoot(rawRoot, { owner } = {}) {
   }
 
   if (rawRoot.version >= 2 || rawRoot.inbox || rawRoot.sent) {
+    const inboxPointer = rawRoot.inbox ?? (rawRoot.cid ? rawRoot : null)
+    const sentPointer = rawRoot.sent ?? null
     return {
       owner: rawRoot.owner ?? owner ?? null,
       version: rawRoot.version ?? 2,
-      inbox: normalizeUploadResult(rawRoot.inbox ?? rawRoot.cid ? rawRoot : null),
-      sent: normalizeUploadResult(rawRoot.sent ?? null),
+      inbox: normalizeUploadResult(inboxPointer),
+      sent: normalizeUploadResult(sentPointer),
     }
   }
 

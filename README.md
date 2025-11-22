@@ -79,8 +79,17 @@ Vite serves the UI at `http://localhost:5173`.
 `@dmail/core` talks directly to Filecoin Onchain Cloud via the Synapse SDK:
 
 - Provide `VITE_FILECOIN_PRIVATE_KEY` **or** `VITE_FILECOIN_SESSION_KEY`.
-- Optional overrides: `VITE_FILECOIN_PROVIDER_ID`, `VITE_FILECOIN_DATASET_ID`, `VITE_FILECOIN_DATASET_CREATE_NEW`, etc.
+- Optional overrides: `VITE_FILECOIN_PROVIDER_ID`, `VITE_FILECOIN_DATASET_ID`, `VITE_FILECOIN_DATASET_CREATE_NEW`, `VITE_FILECOIN_WITH_CDN`, etc.
 - Upload metadata is tagged (`type=dmail-email`, `from`, `to`, etc.) so you can inspect jobs in the Synapse UI.
+
+### CDN-enabled datasets
+
+1. In the Synapse dashboard (or via SDK) create a dataset with **With CDN = Yes**. Note the dataset ID/provider ID.
+2. Set the following env vars:
+   - `FILECOIN_WITH_CDN=1` (or `VITE_FILECOIN_WITH_CDN=1` for frontend-only uploads) to request CDN-backed storage.
+   - `FILECOIN_REQUIRE_CDN=1` if you want the app to throw when the resolved dataset isn’t CDN-enabled.
+   - `FILECOIN_DATASET_ID=<new id>` (optional) to pin uploads to that dataset. If omitted and `FILECOIN_REQUIRE_CDN=1`, the app will auto-create a CDN dataset.
+3. Restart `npm run dev`. The storage context now verifies `context.withCDN`; uploads fail fast if the provider doesn't support CDN.
 
 ## Package Scripts
 
