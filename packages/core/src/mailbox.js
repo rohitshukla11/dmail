@@ -372,13 +372,11 @@ export async function appendMailboxIndexEntry({
   type = 'inbox',
   loadOptions,
   persistOptions,
-  mailbox: prefetchedMailbox,
 }) {
   if (!ownerEns) {
     throw new Error('appendMailboxIndexEntry: ownerEns is required')
   }
   const { mailbox } = await fetchMailboxIndex(ownerEns, mailboxRoot, type, {
-    mailbox: prefetchedMailbox,
     loadOptions,
   })
   const entryMetadata = {
@@ -422,7 +420,6 @@ async function appendMailboxEntryAndSyncResolver({
   resolveOptions,
   resolverOptions,
   skipResolverUpdate = false,
-  mailbox: prefetchedMailbox,
 }) {
   const baselineRoot = await resolveMailboxRootForOwner(ownerEns, mailboxRoot, resolveOptions)
   const result = await appendMailboxIndexEntry({
@@ -433,7 +430,6 @@ async function appendMailboxEntryAndSyncResolver({
     type,
     loadOptions,
     persistOptions,
-    mailbox: prefetchedMailbox,
   })
   if (!skipResolverUpdate) {
     await updateResolverMailboxRootImpl(ownerEns, result.mailboxRoot, resolverOptions)
