@@ -92,9 +92,10 @@ const parseBooleanFlag = (value) => {
   return undefined
 }
 
-const getReadStatusStorageKey = (owner) => {
+const getReadStatusStorageKey = (owner, namespace) => {
   if (!owner) return null
-  return `${READ_STATUS_STORAGE_PREFIX}${owner}`
+  const ns = namespace ? String(namespace).toLowerCase() : 'default'
+  return `${READ_STATUS_STORAGE_PREFIX}${ns}:${owner}`
 }
 
 const loadReadStatusFromStorage = (key) => {
@@ -185,7 +186,7 @@ const persistEmailPackIndexToStorage = (owner, index) => {
   window.localStorage.setItem(key, serializeForStorage(sanitized))
 }
 
-const deriveEmailPackEntries = (index, folder) => {
+const deriveEmailPackEntries = (index, folder, mailboxNamespace) => {
   const normalizedFolder = folder === 'inbox' ? 'inbox' : 'sent'
   if (!index || !Array.isArray(index.packs)) {
     return []
@@ -196,6 +197,16 @@ const deriveEmailPackEntries = (index, folder) => {
     if (!normalized) return
     const hints = normalized.indexEntry?.folderHints ?? ['sent']
     if (!hints.includes(normalizedFolder)) return
+    const entryMessageId =
+      normalized.indexEntry?.messageId ?? normalized.messageId ?? normalized.cid ?? null
+    if (mailboxNamespace) {
+      if (!entryMessageId) {
+        return
+      }
+      if (!String(entryMessageId).startsWith(`${mailboxNamespace}:`)) {
+        return
+      }
+    }
     entries.push({
       folder: normalizedFolder,
       from: normalized.indexEntry?.from ?? normalized.indexEntry?.sender ?? normalized.indexEntry?.owner,
@@ -216,12 +227,19 @@ const deriveEmailPackEntries = (index, folder) => {
   return entries.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
 }
 
-const transformRemoteMailboxEntries = (entries, folder) => {
+const transformRemoteMailboxEntries = (entries, folder, mailboxNamespace) => {
   if (!Array.isArray(entries)) {
     return []
   }
   const normalizedFolder = folder === 'sent' ? 'sent' : 'inbox'
-  return entries.map((entry) => ({
+  return entries
+    .filter((entry) => {
+      if (!mailboxNamespace) return true
+      const messageId = entry.messageId ?? entry.cid
+      if (!messageId) return false
+      return String(messageId).startsWith(`${mailboxNamespace}:`)
+    })
+    .map((entry) => ({
     folder: normalizedFolder,
     from: entry.from ?? entry.owner ?? 'unknown',
     toRecipients: Array.isArray(entry.to) ? entry.to : [],
@@ -236,7 +254,7 @@ const transformRemoteMailboxEntries = (entries, folder) => {
     },
     indexEntry: entry,
     _signatureValid: true,
-  }))
+    }))
 }
 
 const getOutboxStorageKey = (address) => {
@@ -309,6 +327,7 @@ function writeIdentityRegistrationCache(cache) {
 }
 
 const FALLBACK_SEPOLIA_RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com'
+const DEFAULT_IDENTITY_DOMAIN = 'dmail.app'
 const SEPOLIA_CHAIN_ID_HEX = '0xaa36a7'
 function stringToBase64(value) {
   if (typeof window !== 'undefined' && window.btoa) {
@@ -321,10 +340,49 @@ function stringToBase64(value) {
 }
 
 function getBrowserHostname() {
-  if (typeof window !== 'undefined' && window.location) {
-    return window.location.hostname
+  const envSources = [
+    import.meta?.env?.VITE_DMAIL_APP_DOMAIN,
+    import.meta?.env?.DMAIL_APP_DOMAIN,
+    import.meta?.env?.VITE_APP_DOMAIN,
+    import.meta?.env?.APP_DOMAIN,
+    import.meta?.env?.VITE_DOMAIN,
+    import.meta?.env?.DOMAIN,
+  ]
+  for (const value of envSources) {
+    if (value) {
+      return String(value).toLowerCase()
+    }
   }
-  return undefined
+  if (typeof window !== 'undefined') {
+    const cfg = window.__DMAIL_CONFIG__ ?? {}
+    const configKeys = ['DMAIL_APP_DOMAIN', 'APP_DOMAIN', 'DOMAIN']
+    for (const key of configKeys) {
+      if (cfg[key]) {
+        return String(cfg[key]).toLowerCase()
+      }
+    }
+  }
+  return DEFAULT_IDENTITY_DOMAIN
+}
+
+function getMailboxNamespace(domain) {
+  return `mailbox:${domain ?? DEFAULT_IDENTITY_DOMAIN}`
+}
+
+function namespacedMessageId(rawId, namespace) {
+  if (!rawId) return rawId
+  if (!namespace) return rawId
+  if (String(rawId).startsWith(`${namespace}:`)) {
+    return String(rawId)
+  }
+  return `${namespace}:${rawId}`
+}
+
+function stripNamespaceFromId(rawId, namespace) {
+  if (!rawId || !namespace) return rawId
+  const prefix = `${namespace}:`
+  const value = String(rawId)
+  return value.startsWith(prefix) ? value.substring(prefix.length) : value
 }
 
 
@@ -395,9 +453,15 @@ function App() {
     return null
   }, [walletAddress, ensName])
 
+  const identityDomain = useMemo(() => getBrowserHostname(), [])
+  const mailboxNamespace = useMemo(
+    () => getMailboxNamespace(identityDomain),
+    [identityDomain]
+  )
+
   const readStatusStorageKey = useMemo(
-    () => getReadStatusStorageKey(emailPackOwner),
-    [emailPackOwner]
+    () => getReadStatusStorageKey(emailPackOwner, mailboxNamespace),
+    [emailPackOwner, mailboxNamespace]
   )
   const [readMessageIds, setReadMessageIds] = useState(() => new Set())
 
@@ -406,7 +470,9 @@ function App() {
       setReadMessageIds(new Set())
       return
     }
-    setReadMessageIds(loadReadStatusFromStorage(readStatusStorageKey))
+    const loaded = loadReadStatusFromStorage(readStatusStorageKey)
+    console.log('[readStatus] Loaded read status from storage:', Array.from(loaded))
+    setReadMessageIds(loaded)
   }, [readStatusStorageKey])
 
   useEffect(() => {
@@ -439,12 +505,13 @@ function App() {
   const markMessageAsRead = useCallback(
     (messageId) => {
       if (!messageId) return
+      const normalizedId = String(messageId)
       setReadMessageIds((prev) => {
-        if (prev.has(messageId)) {
+        if (prev.has(normalizedId)) {
           return prev
         }
         const next = new Set(prev)
-        next.add(messageId)
+        next.add(normalizedId)
         persistReadStatusToStorage(readStatusStorageKey, next)
         return next
       })
@@ -561,10 +628,10 @@ function App() {
     (nextIndex) => {
       if (!appConfig.oneUploadPerEmail) return
       const sanitized = sanitizeEmailPackIndex(emailPackOwner, nextIndex?.packs ?? [])
-      setMailboxEntries(deriveEmailPackEntries(sanitized, 'inbox'))
-      setSentEntries(deriveEmailPackEntries(sanitized, 'sent'))
+      setMailboxEntries(deriveEmailPackEntries(sanitized, 'inbox', mailboxNamespace))
+      setSentEntries(deriveEmailPackEntries(sanitized, 'sent', mailboxNamespace))
     },
-    [appConfig.oneUploadPerEmail, emailPackOwner]
+    [appConfig.oneUploadPerEmail, emailPackOwner, mailboxNamespace]
   )
 
   const refreshLocalEmailPackIndex = useCallback(() => {
@@ -589,12 +656,23 @@ function App() {
       if (!appConfig.oneUploadPerEmail || !emailPackOwner) return
       const normalized = normalizeEmailPackIndexEntry(entry)
       if (!normalized) return
+      if (mailboxNamespace) {
+        const namespaced = namespacedMessageId(
+          normalized.indexEntry?.messageId ?? normalized.messageId,
+          mailboxNamespace
+        )
+        normalized.indexEntry.messageId = namespaced
+        normalized.messageId = namespaced
+      }
       setEmailPackIndex((prev) => {
         const base =
           prev && prev.owner === emailPackOwner ? prev : sanitizeEmailPackIndex(emailPackOwner, prev?.packs ?? [])
         const filtered = (base.packs ?? []).filter((pack) => {
           const existingId = pack.messageId ?? pack.indexEntry?.messageId
-          return existingId !== normalized.messageId && existingId !== normalized.indexEntry?.messageId
+          return (
+            existingId !== normalized.messageId &&
+            existingId !== normalized.indexEntry?.messageId
+          )
         })
         const next = {
           owner: emailPackOwner,
@@ -604,19 +682,64 @@ function App() {
         syncLocalEmailPackEntries(next)
         return next
       })
+      const singleIndex = {
+        owner: emailPackOwner,
+        packs: [normalized],
+      }
+      const newInboxEntries = deriveEmailPackEntries(singleIndex, 'inbox', mailboxNamespace)
+      if (newInboxEntries.length) {
+        const newEntry = newInboxEntries[0]
+        setMailboxEntries((prev) => {
+          const filtered = (prev ?? []).filter((existing) => existing.messageId !== newEntry.messageId)
+          return [newEntry, ...filtered]
+        })
+      }
+      const newSentEntries = deriveEmailPackEntries(singleIndex, 'sent', mailboxNamespace)
+      if (newSentEntries.length) {
+        const newEntry = newSentEntries[0]
+        setSentEntries((prev) => {
+          const filtered = (prev ?? []).filter((existing) => existing.messageId !== newEntry.messageId)
+          return [newEntry, ...filtered]
+        })
+      }
     },
-    [appConfig.oneUploadPerEmail, emailPackOwner, syncLocalEmailPackEntries]
+    [appConfig.oneUploadPerEmail, emailPackOwner, mailboxNamespace, syncLocalEmailPackEntries]
   )
 
   const removeEmailPackEntries = useCallback(
     (messageIds = []) => {
       if (!appConfig.oneUploadPerEmail || !emailPackOwner || !messageIds.length) return
+      const targetIds = new Set(
+        messageIds.flatMap((id) => {
+          const strId = String(id)
+          if (!mailboxNamespace) {
+            return [strId]
+          }
+          const prefixed = namespacedMessageId(strId, mailboxNamespace)
+          const stripped = stripNamespaceFromId(strId, mailboxNamespace)
+          const variants = [prefixed, stripped]
+          if (strId !== prefixed && strId !== stripped) {
+            variants.push(strId)
+          }
+          return variants
+        })
+      )
       setEmailPackIndex((prev) => {
         const base =
           prev && prev.owner === emailPackOwner ? prev : sanitizeEmailPackIndex(emailPackOwner, prev?.packs ?? [])
         const filtered = (base.packs ?? []).filter((pack) => {
           const packMessageId = pack.messageId ?? pack.indexEntry?.messageId
-          return !messageIds.includes(packMessageId)
+          if (!packMessageId) {
+            return true
+          }
+          const variants = mailboxNamespace
+            ? [
+                String(packMessageId),
+                stripNamespaceFromId(packMessageId, mailboxNamespace),
+                namespacedMessageId(packMessageId, mailboxNamespace),
+              ]
+            : [String(packMessageId)]
+          return !variants.some((variant) => targetIds.has(String(variant)))
         })
         const next = {
           owner: emailPackOwner,
@@ -1135,8 +1258,8 @@ function App() {
             ])
             if (remoteInbox || remoteSent) {
               remoteLoaded = true
-              const inboxEntriesList = transformRemoteMailboxEntries(remoteInbox ?? [], 'inbox')
-              const sentEntriesList = transformRemoteMailboxEntries(remoteSent ?? [], 'sent')
+              const inboxEntriesList = transformRemoteMailboxEntries(remoteInbox ?? [], 'inbox', mailboxNamespace)
+              const sentEntriesList = transformRemoteMailboxEntries(remoteSent ?? [], 'sent', mailboxNamespace)
               setMailboxEntries(inboxEntriesList)
               setSentEntries(sentEntriesList)
               const inboxCount = inboxEntriesList.length
@@ -1241,12 +1364,9 @@ function App() {
       setLoadingInbox(false)
     }
   }, [
-    activeView,
-    annotateEntriesWithSignature,
     appConfig.oneUploadPerEmail,
     ensName,
-    ensureProvider,
-    getEnsProvider,
+    mailboxNamespace,
     refreshLocalEmailPackIndex,
     walletAddress,
   ])
@@ -1330,29 +1450,68 @@ function App() {
             providerInfo: pointer.providerInfo,
           })
           const normalizedPack = normalizeEmailPack(packPayload)
-          const envelopeCandidate = isSentEntry
+          const primaryEnvelope = isSentEntry
             ? normalizedPack.senderEnvelope ?? normalizedPack.recipientEnvelope
             : normalizedPack.recipientEnvelope ?? normalizedPack.senderEnvelope
-          if (!envelopeCandidate) {
+          const alternateEnvelope = isSentEntry
+            ? normalizedPack.recipientEnvelope
+            : normalizedPack.senderEnvelope
+          if (!primaryEnvelope) {
             throw new Error('Email pack does not contain an encrypted envelope to decrypt.')
           }
-          const decrypted = await decryptEmail(
-            envelopeCandidate,
-            {
-              identityPrivateKey: identityMaterialRef.current?.privateKey ?? null,
-              senderSecret: identityMaterialRef.current?.privateKey ?? null,
-            },
-            {
-              fetchAttachmentsFromSynapse: true,
+          const identityKey = identityMaterialRef.current?.privateKey ?? null
+          if (!identityKey) {
+            throw new Error('Identity private key not available. Please reconnect your wallet.')
+          }
+          const decryptEnvelope = async (envelope, label) => {
+            console.log(`[openEmail] Attempting to decrypt ${label} envelope`, {
+              hasEphemeralPublicKey: !!envelope?.ephemeralPublicKey,
+              messageId: envelope?.messageId,
+              isSentEntry,
+            })
+            return await decryptEmail(
+              envelope,
+              {
+                identityPrivateKey: identityKey,
+                senderSecret: identityKey,
+              },
+              {
+                fetchAttachmentsFromSynapse: true,
+              }
+            )
+          }
+          let decryptedPack
+          let decryptedEnvelopeUsed = primaryEnvelope
+          try {
+            decryptedPack = await decryptEnvelope(primaryEnvelope, 'primary')
+          } catch (primaryError) {
+            console.warn('[openEmail] Primary email pack decryption failed:', primaryError)
+            if (alternateEnvelope && alternateEnvelope !== primaryEnvelope) {
+              console.log('[openEmail] Retrying email pack decryption with alternate envelope')
+              decryptedPack = await decryptEnvelope(alternateEnvelope, 'alternate')
+              decryptedEnvelopeUsed = alternateEnvelope
+            } else {
+              throw new Error(
+                `Failed to decrypt email. ${
+                  primaryError?.message ?? 'Envelope may have been encrypted with a different key.'
+                }`
+              )
             }
-          )
+          }
           setSelectedEmail({
             entry,
-            decrypted,
-            encrypted: envelopeCandidate,
+            decrypted: decryptedPack,
+            encrypted: decryptedEnvelopeUsed,
             signatureValid: null,
             emailPack: normalizedPack,
           })
+          const entryId = entry.messageId ?? entry.cid ?? entry._outboxId ?? entry.id ?? null
+          if (entryId) {
+            console.log('[openEmail] Marking message as read:', entryId)
+            markMessageAsRead(String(entryId))
+          } else {
+            console.warn('[openEmail] Could not determine entryId for read status:', entry)
+          }
           setStatusMessage('')
           return
         }
@@ -1475,9 +1634,13 @@ function App() {
         })
         const entryFolder = entry.folder ?? (activeView || 'inbox')
         if (entryFolder === 'inbox') {
-          const entryId = entry.messageId ?? entry.cid ?? entry._outboxId ?? null
+          // Use the same entryId calculation as in the email list
+          const entryId = entry.messageId ?? entry.cid ?? entry._outboxId ?? entry.id ?? null
           if (entryId) {
-            markMessageAsRead(entryId)
+            console.log('[openEmail] Marking message as read:', entryId)
+            markMessageAsRead(String(entryId))
+          } else {
+            console.warn('[openEmail] Could not determine entryId for read status:', entry)
           }
         }
         setStatusMessage('')
@@ -1658,23 +1821,25 @@ function App() {
       setErrorMessage('No emails selected')
       return
     }
-    
-    const confirmDelete = window.confirm(
-      `Are you sure you want to delete ${selectedEmails.length} email(s)? This action cannot be undone.`
-    )
-    if (!confirmDelete) return
-    
+    const idsToRemove = selectedEmails
+      .map((entry) => entry.messageId ?? entry.cid)
+      .filter(Boolean)
+
+    if (appConfig.oneUploadPerEmail) {
+      removeEmailPackEntries(idsToRemove)
+      setMailboxEntries((prev) =>
+        (prev ?? []).filter((entry) => !idsToRemove.includes(entry.messageId ?? entry.cid))
+      )
+      setSentEntries((prev) =>
+        (prev ?? []).filter((entry) => !idsToRemove.includes(entry.messageId ?? entry.cid))
+      )
+      setSelectedEmails([])
+      setSelectedEmail(null)
+      setStatusMessage(`Deleted ${idsToRemove.length} local email pack(s)`)
+      return
+    }
+
     try {
-      if (appConfig.oneUploadPerEmail) {
-        const selectedKeys = selectedEmails
-          .map((entry) => entry.messageId ?? entry.cid)
-          .filter(Boolean)
-        removeEmailPackEntries(selectedKeys)
-        setSelectedEmails([])
-        setSelectedEmail(null)
-        setStatusMessage(`Deleted ${selectedKeys.length} local email pack(s)`)
-        return
-      }
       setStatusMessage(`Deleting ${selectedEmails.length} email(s)...`)
       const browserProvider = await ensureProvider()
       const signer = await browserProvider.getSigner()
@@ -1685,15 +1850,15 @@ function App() {
         throw new Error('ENS name not resolved. Connect wallet first.')
       }
       
-      const selectedKeys = selectedEmails.map(e => e.messageId ?? e.cid)
-      
       // Filter out deleted emails from current entries
-      const newInboxEntries = activeView === 'inbox' 
-        ? mailboxEntries.filter(e => !selectedKeys.includes(e.messageId ?? e.cid))
-        : mailboxEntries
-      const newSentEntries = activeView === 'sent'
-        ? sentEntries.filter(e => !selectedKeys.includes(e.messageId ?? e.cid))
-        : sentEntries
+      const newInboxEntries =
+        activeView === 'inbox'
+          ? mailboxEntries.filter((e) => !idsToRemove.includes(e.messageId ?? e.cid))
+          : mailboxEntries
+      const newSentEntries =
+        activeView === 'sent'
+          ? sentEntries.filter((e) => !idsToRemove.includes(e.messageId ?? e.cid))
+          : sentEntries
       
       // Update local state immediately (optimistic update)
       setMailboxEntries(newInboxEntries)
@@ -1947,6 +2112,14 @@ function App() {
           }
         )
 
+        const rawMessageId =
+          encryptedEmail.messageId ??
+          encryptedEmail.recipientEnvelope?.messageId ??
+          encryptedEmail.senderEnvelope?.messageId ??
+          crypto.randomUUID?.() ??
+          generateOutboxId()
+        const namespacedId = namespacedMessageId(rawMessageId, mailboxNamespace)
+
         const outboxItem = {
           id: generateOutboxId(),
           senderEns,
@@ -1956,7 +2129,8 @@ function App() {
           status: 'pending',
           errorMessage: null,
           metadata: {
-            messageId: encryptedEmail.messageId,
+            messageId: namespacedId,
+            rawMessageId,
             subjectPreview,
             toRecipients,
             cc: ccRecipients,
@@ -1997,6 +2171,7 @@ function App() {
       ensureProvider,
       ensName,
       getEnsProvider,
+      mailboxNamespace,
       requestOutboxProcessingRef,
       walletAddress,
     ]
@@ -2034,7 +2209,11 @@ function App() {
                 ? item.metadata.toRecipients
                 : [item.recipientEns].filter(Boolean)
             const ccRecipients = Array.isArray(item.metadata?.cc) ? item.metadata.cc : []
-            const messageId = item.metadata?.messageId ?? recipientEnvelope.messageId ?? item.id
+            const rawMessageId = item.metadata?.rawMessageId ?? recipientEnvelope.messageId ?? item.id
+            const messageId = namespacedMessageId(
+              rawMessageId ?? item.id ?? crypto.randomUUID?.(),
+              mailboxNamespace
+            )
             const timestamp = item.timestamp ?? Date.now()
             const subjectPreview = item.metadata?.subjectPreview ?? '(No subject)'
             const folderHints = item.isSelfRecipient ? ['sent', 'inbox'] : ['sent']
@@ -2096,27 +2275,27 @@ function App() {
             recipientOwnerSet.forEach((recipient) => {
               addFolderHintsForOwner(recipient, ['inbox'])
             })
-            await Promise.all(
-              Array.from(ownerFolderHints.values()).map(({ owner, folders }) =>
-                appendRemoteMailboxEntry({
-                  owner,
-                  messageId,
-                  cid: pointer.cid,
-                  pieceCid: pointer.pieceCid,
-                  providerInfo: pointer.providerInfo,
-                  folderHints: Array.from(folders),
-                  timestamp,
-                  subjectPreview,
-                  to: toRecipients,
-                  from: senderEnsValue,
-                }).catch((remoteAppendError) => {
-                  console.warn(
-                    `[outbox] Failed to append mailbox pointer to backend for owner ${owner}`,
-                    remoteAppendError
-                  )
-                })
-              )
-            )
+            // Fire and forget backend API calls - don't block on them
+            // The email is already uploaded to Filecoin, so we can mark it as sent
+            Array.from(ownerFolderHints.values()).forEach(({ owner, folders }) => {
+              appendRemoteMailboxEntry({
+                owner,
+                messageId,
+                cid: pointer.cid,
+                pieceCid: pointer.pieceCid,
+                providerInfo: pointer.providerInfo,
+                folderHints: Array.from(folders),
+                timestamp,
+                subjectPreview,
+                to: toRecipients,
+                from: senderEnsValue,
+              }).catch((remoteAppendError) => {
+                console.warn(
+                  `[outbox] Failed to append mailbox pointer to backend for owner ${owner}`,
+                  remoteAppendError
+                )
+              })
+            })
             itemResults.set(item.id, {
               success: true,
               packEntry: pointer,
@@ -2132,7 +2311,7 @@ function App() {
       )
       return { itemResults, ownerRoots: new Map() }
     },
-    [ensureIdentityMaterial, ensName, getEnsProvider, walletAddress]
+    [ensureIdentityMaterial, ensName, getEnsProvider, mailboxNamespace, walletAddress]
   )
 
   const deliverOutboxBatch = useCallback(
@@ -2479,7 +2658,6 @@ function App() {
     try {
       setStatusMessage(`Delivering ${pendingItems.length} queued email(s)...`)
       const delivery = await deliverOutboxBatch(pendingItems)
-      let shouldRefreshInbox = false
       pendingItems.forEach((item) => {
         const result = delivery.itemResults.get(item.id)
         if (result?.success) {
@@ -2490,7 +2668,6 @@ function App() {
             })
             appendEmailPackEntry(result.packEntry)
             removeOutboxItem(item.id)
-            shouldRefreshInbox = true
           } else {
             removeOutboxItem(item.id)
             if (result.senderEntry) {
@@ -2517,9 +2694,6 @@ function App() {
           })
         }
       })
-      if (appConfig.oneUploadPerEmail && shouldRefreshInbox) {
-        void refreshInbox()
-      }
       if (!appConfig.oneUploadPerEmail) {
         const selfOwnerEns =
           ensName ?? pendingItems.find((item) => item.senderEns)?.senderEns ?? null
@@ -2746,10 +2920,7 @@ function App() {
         </div>
       </header>
 
-      {/* Status Messages - filter out wallet connection status since it's in navbar, hide in calendar view */}
-      {statusMessage && statusMessage !== 'Wallet connected' && activeView !== 'calendar' && (
-        <div className="toast toast-success">{statusMessage}</div>
-      )}
+      {/* Status Messages - hide success loader permanently per user request */}
       {errorMessage && <div className="toast toast-error">{errorMessage}</div>}
 
       <div className="gmail-container">
@@ -2918,10 +3089,12 @@ function App() {
                   !isOutbox &&
                   selectedEmails.some((e) => (e.messageId ?? e.cid) === (entry.messageId ?? entry.cid))
                 const statusLabel = isOutbox ? getOutboxStatusLabel(entry.status) : null
-                const entryId = entry.messageId ?? entry.cid ?? entry._outboxId ?? String(entryKey)
+                // Calculate entryId consistently - must match the ID used when marking as read
+                const entryId = entry.messageId ?? entry.cid ?? entry._outboxId ?? entry.id ?? String(entryKey)
+                const entryIdString = String(entryId)
                 const entryFolder = entry.folder ?? (isOutbox ? 'sent' : 'inbox')
                 const isInboxEntry = entryFolder === 'inbox'
-                const isRead = !isInboxEntry || readMessageIds.has(entryId)
+                const isRead = !isInboxEntry || readMessageIds.has(entryIdString)
                 const itemClasses = [
                   'email-item',
                   isActive ? 'active' : '',
@@ -2949,11 +3122,11 @@ function App() {
                     <span className="email-sender">{entry.from || 'Unknown'}</span>
               <span className="email-subject">
                 {entry.subjectPreview || '(No subject)'}
-                {!isOutbox && entry._signatureValid ? (
-                  <span className="signature-badge signature-valid" title="Signature verified">
+                {isInboxEntry && isRead && (
+                  <span className="signature-badge signature-valid read-receipt" title="Read">
                     ✓
                   </span>
-                ) : null}
+                )}
                 {!isInboxEntry && statusLabel && (
                   <span className={`email-status-badge status-${entry.status ?? 'pending'}`}>
                     {statusLabel}

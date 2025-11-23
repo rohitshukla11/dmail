@@ -179,6 +179,20 @@ async function handleMailboxAppend(request: Request, env: Env) {
   const timestamp = Number(body.timestamp ?? Date.now())
   const subjectPreview = body.subjectPreview ?? null
 
+  // Ensure an identity row exists for the owner so downstream lookups succeed
+  let identity = await env.DB.prepare('SELECT * FROM identities WHERE identifier = ?1')
+    .bind(owner)
+    .first()
+  if (!identity) {
+    await env.DB.prepare(
+      `INSERT INTO identities (identifier, wallet, x25519PublicKey, signingPublicKey, updatedAt)
+       VALUES (?1, NULL, NULL, NULL, ?2)`
+    )
+      .bind(owner, Date.now())
+      .run()
+    console.log(`[resolver] Created placeholder identity for ${owner}`)
+  }
+
   const stmt = env.DB.prepare(
     `INSERT INTO mailbox_index
       (owner, messageId, cid, pieceCid, providerInfo, folder, timestamp, subjectPreview, recipients, sender)
@@ -223,6 +237,29 @@ async function handleMailboxIndex(url: URL, env: Env) {
   }))
 
   return jsonResponse(env, entries)
+}
+
+async function handleMailboxReset(request: Request, env: Env) {
+  const body = await readJson<any>(request)
+  if (!body?.owner || !Array.isArray(body.folders) || body.folders.length === 0) {
+    return jsonResponse(env, { error: 'owner and folders required' }, { status: 400 })
+  }
+  const owner = normalizeIdentifier(body.owner)
+  if (!owner) {
+    return jsonResponse(env, { error: 'owner invalid' }, { status: 400 })
+  }
+  const foldersToClear = body.folders
+    .map((folder: string) => folder?.toLowerCase())
+    .filter((folder: string) => allowedFolders.has(folder))
+  if (!foldersToClear.length) {
+    return jsonResponse(env, { error: 'no valid folders provided' }, { status: 400 })
+  }
+  await env.DB.batch(
+    foldersToClear.map((folder) =>
+      env.DB.prepare('DELETE FROM mailbox_index WHERE owner = ?1 AND folder = ?2').bind(owner, folder)
+    )
+  )
+  return jsonResponse(env, { ok: true, owner, folders: foldersToClear })
 }
 
 async function handleEnsWellKnown(name: string, env: Env) {
@@ -317,6 +354,10 @@ export default {
 
       if (pathname === '/v1/mailbox/index' && request.method === 'GET') {
         return handleMailboxIndex(url, env)
+      }
+
+      if (pathname === '/v1/mailbox/reset' && request.method === 'POST') {
+        return handleMailboxReset(request, env)
       }
 
       if (pathname.startsWith('/.well-known/ens/') && request.method === 'GET') {

@@ -484,7 +484,7 @@ body {
   border-bottom: 1px solid #f0f0f0;
   cursor: pointer;
   transition: box-shadow 100ms;
-  background: var(--color-hover);
+  background: #fff;
 }
 
 .email-item:hover {
@@ -494,15 +494,22 @@ body {
 }
 
 .email-item.unread {
-  background-color: #fff;
+  background-color: #fff !important;
+}
+
+.email-item.unread:hover {
+  background-color: #f7fafd !important;
+}
+
+.email-item.unread.active {
+  background-color: #fff !important;
 }
 
 .email-item.read {
-  background-color: var(--color-hover);
+  background-color: var(--color-hover) !important;
 }
 
 .email-item.active {
-  background: var(--color-hover);
   box-shadow: inset 4px 0 0 var(--compose-btn);
 }
 
