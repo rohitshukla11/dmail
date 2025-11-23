@@ -1219,6 +1219,7 @@ function App() {
             signatureValid: null,
             emailPack: normalizedPack,
           })
+          setStatusMessage('')
           return
         }
         
@@ -1338,9 +1339,11 @@ function App() {
           encrypted: encryptedPayload,
           signatureValid,
         })
+        setStatusMessage('')
       } catch (error) {
         console.error(error)
         setErrorMessage(error.message ?? 'Failed to decrypt email. Check private key.')
+        setStatusMessage('')
       }
     },
     [activeView]
