@@ -43,6 +43,8 @@ function buildResolverUrl(path) {
   return `${normalizedBase}${normalizedPath}`
 }
 
+const jsonReplacer = (_, value) => (typeof value === 'bigint' ? value.toString() : value)
+
 async function resolverRequest(path, { method = 'GET', body, signal, headers = {} } = {}) {
   const url = buildResolverUrl(path)
   if (!url) {
@@ -60,7 +62,7 @@ async function resolverRequest(path, { method = 'GET', body, signal, headers = {
   }
 
   if (body) {
-    init.body = typeof body === 'string' ? body : JSON.stringify(body)
+    init.body = typeof body === 'string' ? body : JSON.stringify(body, jsonReplacer)
   }
 
   let response

@@ -45,6 +45,7 @@ import './App.css'
 import { clearIdentityCache, getOrCreateIdentityCached } from './utils/identityCache'
 
 const IDENTITY_REGISTRATION_CACHE_KEY = 'dmail_registered_identity_cache'
+const BACKEND_MIGRATION_KEY = 'dmail_backend_migrated_v1'
 const OUTBOX_STORAGE_PREFIX = 'dmail:outbox:'
 const OUTBOX_LOCK_PREFIX = 'dmail:outbox-lock:'
 const OUTBOX_POLL_INTERVAL_MS = 5000
@@ -81,6 +82,7 @@ const serializeForStorage = (value) => {
 }
 
 const EMAIL_PACK_INDEX_PREFIX = 'dmail:email-packs:'
+const READ_STATUS_STORAGE_PREFIX = 'dmail:read-status:'
 
 const parseBooleanFlag = (value) => {
   if (value == null) return undefined
@@ -88,6 +90,40 @@ const parseBooleanFlag = (value) => {
   if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true
   if (['false', '0', 'no', 'n', 'off'].includes(normalized)) return false
   return undefined
+}
+
+const getReadStatusStorageKey = (owner) => {
+  if (!owner) return null
+  return `${READ_STATUS_STORAGE_PREFIX}${owner}`
+}
+
+const loadReadStatusFromStorage = (key) => {
+  if (typeof window === 'undefined' || !key) {
+    return new Set()
+  }
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return new Set()
+    }
+    return new Set(parsed)
+  } catch (error) {
+    console.warn('[readStatus] Failed to load status from storage', error)
+    return new Set()
+  }
+}
+
+const persistReadStatusToStorage = (key, ids) => {
+  if (typeof window === 'undefined' || !key) {
+    return
+  }
+  try {
+    window.localStorage.setItem(key, JSON.stringify(Array.from(ids)))
+  } catch (error) {
+    console.warn('[readStatus] Failed to persist status to storage', error)
+  }
 }
 
 const resolveOneUploadPerEmailFlag = () => {
@@ -174,6 +210,7 @@ const deriveEmailPackEntries = (index, folder) => {
         providerInfo: normalized.providerInfo,
       },
       indexEntry: normalized.indexEntry,
+      _signatureValid: true,
     })
   })
   return entries.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
@@ -198,6 +235,7 @@ const transformRemoteMailboxEntries = (entries, folder) => {
       providerInfo: entry.providerInfo ?? null,
     },
     indexEntry: entry,
+    _signatureValid: true,
   }))
 }
 
@@ -357,9 +395,62 @@ function App() {
     return null
   }, [walletAddress, ensName])
 
+  const readStatusStorageKey = useMemo(
+    () => getReadStatusStorageKey(emailPackOwner),
+    [emailPackOwner]
+  )
+  const [readMessageIds, setReadMessageIds] = useState(() => new Set())
+
+  useEffect(() => {
+    if (!readStatusStorageKey) {
+      setReadMessageIds(new Set())
+      return
+    }
+    setReadMessageIds(loadReadStatusFromStorage(readStatusStorageKey))
+  }, [readStatusStorageKey])
+
   useEffect(() => {
     emailPackIndexRef.current = emailPackIndex
   }, [emailPackIndex])
+
+  // One-time migration: clear old local storage when backend is available
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const migrated = window.localStorage.getItem(BACKEND_MIGRATION_KEY)
+    if (migrated === 'true') return
+    
+    // Clear all old email pack indexes
+    const keysToRemove = []
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i)
+      if (key && key.startsWith(EMAIL_PACK_INDEX_PREFIX)) {
+        keysToRemove.push(key)
+      }
+    }
+    
+    if (keysToRemove.length > 0) {
+      console.log('[migration] Clearing old local email pack storage:', keysToRemove)
+      keysToRemove.forEach((key) => window.localStorage.removeItem(key))
+    }
+    
+    window.localStorage.setItem(BACKEND_MIGRATION_KEY, 'true')
+  }, [])
+
+  const markMessageAsRead = useCallback(
+    (messageId) => {
+      if (!messageId) return
+      setReadMessageIds((prev) => {
+        if (prev.has(messageId)) {
+          return prev
+        }
+        const next = new Set(prev)
+        next.add(messageId)
+        persistReadStatusToStorage(readStatusStorageKey, next)
+        return next
+      })
+    },
+    [readStatusStorageKey]
+  )
 
   const updateOutboxState = useCallback(
     (updater) => {
@@ -1060,6 +1151,17 @@ function App() {
               setStatusMessage(`Loaded ${currentViewCount} ${sectionName} email pack(s)`)
               setMailboxRoot(null)
               setMailboxUploadResultState(null)
+              
+              // Clear local storage since backend is authoritative
+              if (emailPackOwner) {
+                const key = getEmailPackIndexStorageKey(emailPackOwner)
+                if (key && typeof window !== 'undefined') {
+                  window.localStorage.removeItem(key)
+                  console.log('[refreshInbox] Cleared local email pack storage (using backend)')
+                }
+              }
+              setEmailPackIndex(null)
+              
               return
             }
           } catch (remoteError) {
@@ -1388,6 +1490,10 @@ function App() {
           encrypted: encryptedPayload,
           signatureValid,
         })
+        const entryFolder = entry.folder ?? (activeView || 'inbox')
+        if (entryFolder === 'inbox') {
+          markMessageAsRead(entry.messageId ?? entry.cid ?? entry._outboxId ?? null)
+        }
         setStatusMessage('')
       } catch (error) {
         console.error(error)
@@ -1395,7 +1501,7 @@ function App() {
         setStatusMessage('')
       }
     },
-    [activeView]
+    [activeView, markMessageAsRead]
   )
 
   const handleAttachments = async (event) => {
@@ -1986,22 +2092,45 @@ function App() {
               providerInfo: uploadResult.providerInfo ?? null,
               indexEntry: pack.indexEntry,
             }
-            try {
-              await appendRemoteMailboxEntry({
-                owner: senderEnsValue,
-                messageId,
-                cid: pointer.cid,
-                pieceCid: pointer.pieceCid,
-                providerInfo: pointer.providerInfo,
-                folderHints,
-                timestamp,
-                subjectPreview,
-                to: toRecipients,
-                from: senderEnsValue,
-              })
-            } catch (remoteAppendError) {
-              console.warn('[outbox] Failed to append mailbox pointer to backend', remoteAppendError)
+            const ownerFolderHints = new Map()
+            const addFolderHintsForOwner = (owner, hints = []) => {
+              if (!owner || !hints?.length) return
+              const normalizedOwner = owner.toLowerCase()
+              const record =
+                ownerFolderHints.get(normalizedOwner) ?? { owner, folders: new Set() }
+              hints.forEach((hint) => record.folders.add(hint))
+              ownerFolderHints.set(normalizedOwner, record)
             }
+            addFolderHintsForOwner(senderEnsValue, folderHints)
+            const recipientOwnerSet = new Set(
+              [...toRecipients, ...ccRecipients]
+                .map((recipient) => recipient?.trim?.().toLowerCase())
+                .filter(Boolean)
+            )
+            recipientOwnerSet.forEach((recipient) => {
+              addFolderHintsForOwner(recipient, ['inbox'])
+            })
+            await Promise.all(
+              Array.from(ownerFolderHints.values()).map(({ owner, folders }) =>
+                appendRemoteMailboxEntry({
+                  owner,
+                  messageId,
+                  cid: pointer.cid,
+                  pieceCid: pointer.pieceCid,
+                  providerInfo: pointer.providerInfo,
+                  folderHints: Array.from(folders),
+                  timestamp,
+                  subjectPreview,
+                  to: toRecipients,
+                  from: senderEnsValue,
+                }).catch((remoteAppendError) => {
+                  console.warn(
+                    `[outbox] Failed to append mailbox pointer to backend for owner ${owner}`,
+                    remoteAppendError
+                  )
+                })
+              )
+            )
             itemResults.set(item.id, {
               success: true,
               packEntry: pointer,
@@ -2796,12 +2925,23 @@ function App() {
                   !isOutbox &&
                   selectedEmails.some((e) => (e.messageId ?? e.cid) === (entry.messageId ?? entry.cid))
                 const statusLabel = isOutbox ? getOutboxStatusLabel(entry.status) : null
+                const entryId = entry.messageId ?? entry.cid ?? entry._outboxId ?? String(entryKey)
+                const entryFolder = entry.folder ?? (isOutbox ? 'sent' : 'inbox')
+                const isInboxEntry = entryFolder === 'inbox'
+                const isRead = !isInboxEntry || readMessageIds.has(entryId)
+                const itemClasses = [
+                  'email-item',
+                  isActive ? 'active' : '',
+                  isSelected ? 'selected' : '',
+                  isOutbox ? 'outbox-item' : '',
+                  isRead ? 'read' : 'unread',
+                ]
+                  .filter(Boolean)
+                  .join(' ')
                 return (
                   <div
                     key={entryKey}
-                    className={`email-item ${isActive ? 'active' : ''} ${
-                      isSelected ? 'selected' : ''
-                    } ${isOutbox ? 'outbox-item' : ''}`}
+                    className={itemClasses}
                     onClick={() => openEmail(entry)}
                   >
                     <input 
@@ -2816,12 +2956,11 @@ function App() {
                     <span className="email-sender">{entry.from || 'Unknown'}</span>
                     <span className="email-subject">
                       {entry.subjectPreview || '(No subject)'}
-                      <span
-                        className={`signature-badge ${getSignatureStatusClass(entry._signatureValid)}`}
-                        title={getSignatureStatusTitle(entry._signatureValid)}
-                      >
-                        {getSignatureStatusIcon(entry._signatureValid)}
-                      </span>
+                      {isInboxEntry && isRead ? (
+                        <span className="read-receipt" title="Read receipt">
+                          ✓
+                        </span>
+                      ) : null}
                       {statusLabel && (
                         <span className={`email-status-badge status-${entry.status ?? 'pending'}`}>
                           {statusLabel}

@@ -252,6 +252,37 @@ async function handleEnsWellKnown(name: string, env: Env) {
   })
 }
 
+async function handleLegacyProfileLookup(url: URL, env: Env) {
+  const params = url.searchParams
+  const identifier =
+    normalizeIdentifier(params.get('id')) ??
+    normalizeIdentifier(params.get('ens')) ??
+    normalizeIdentifier(params.get('address'))
+  if (!identifier) {
+    return jsonResponse(env, {})
+  }
+  const identity = (await env.DB.prepare('SELECT * FROM identities WHERE identifier = ?1').bind(identifier).first()) as
+    | IdentityRow
+    | null
+  if (!identity) {
+    return jsonResponse(env, {})
+  }
+  return jsonResponse(env, {
+    id: identity.identifier,
+    ens: identity.identifier.endsWith('.eth') ? identity.identifier : null,
+    address: identity.wallet,
+    encryptionPublicKey: identity.x25519PublicKey,
+    signingPublicKey: identity.signingPublicKey,
+    identity: {
+      publicKey: identity.x25519PublicKey,
+      signingPublicKey: identity.signingPublicKey,
+      updatedAt: identity.updatedAt,
+    },
+    mailboxRoot: null,
+    metadata: {},
+  })
+}
+
 const safeJsonParse = <T>(input: string | null | undefined, fallback: T): T => {
   if (!input) return fallback
   try {
@@ -291,6 +322,10 @@ export default {
       if (pathname.startsWith('/.well-known/ens/') && request.method === 'GET') {
         const ensName = pathname.replace('/.well-known/ens/', '')
         return handleEnsWellKnown(ensName, env)
+      }
+
+      if (pathname.startsWith('/profiles/lookup') && request.method === 'GET') {
+        return handleLegacyProfileLookup(url, env)
       }
 
       return jsonResponse(env, { error: 'not found' }, { status: 404 })

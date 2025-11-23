@@ -1,10 +1,11 @@
-# dMail v2 — Filecoin + ENS mail client
+# dMail — Decentralized Email on Filecoin + ENS
 
-dMail v2 is a purely client-side mail experience:
+dMail is a fully decentralized email client built on Filecoin storage and ENS identity:
 
-- React + Vite frontend for inbox, compose, attachments and calendar events.
-- `@dmail/core` shared helpers for Synapse uploads, mailbox management, resolver integration and deterministic identities.
-- No more CLI demos, Hardhat scripts, or legacy private-key flows — just the pieces required to run the v2 UI.
+- **React + Vite frontend** for inbox, compose, attachments, and calendar
+- **`@dmail/core`** shared helpers for Synapse uploads, mailbox management, resolver integration, and deterministic identities
+- **Cloudflare Worker backend** for off-chain identity and mailbox index storage
+- **Two modes**: Traditional segmented mailbox or experimental "1 upload per email" MVP mode
 
 ## Repository Layout
 
@@ -45,7 +46,10 @@ VITE_FILECOIN_RPC_URL=https://api.calibration.node.glif.io/rpc/v1
 VITE_FILECOIN_GATEWAY=https://w3s.link/ipfs
 
 # Off-chain API (Cloudflare Worker for identities + mailbox index)
-VITE_DMAIL_API_URL=https://resolver.example/api
+VITE_DMAIL_API_URL=https://your-worker.workers.dev
+
+# Optional: Enable "1 upload per email" MVP mode
+# VITE_DMAIL_ONE_UPLOAD_PER_EMAIL=true
 
 # Optional fallback recipient key when ENS/resolver lookup fails
 VITE_RECIPIENT_PUBLIC_KEY=
@@ -55,16 +59,48 @@ VITE_RECIPIENT_PUBLIC_KEY=
 
 ## Off-chain Resolver Worker
 
-The Cloudflare Worker that stores identity records and mailbox indexes lives in `workers/offchain-resolver`.
+The Cloudflare Worker stores identity records and mailbox indexes for cross-device syncing and faster resolution.
+
+### Local Development
 
 ```bash
 cd workers/offchain-resolver
 npm install
-wrangler d1 migrations apply offchain_resolver_db --local
+npx wrangler d1 migrations apply offchain_resolver_db --local
 npm run dev
 ```
 
-Set `VITE_DMAIL_API_URL` to the worker URL (e.g. `http://127.0.0.1:8787`) while developing locally. Production deployments should point to the Cloudflare worker domain.
+Set `VITE_DMAIL_API_URL` to the worker URL (e.g. `http://127.0.0.1:8787`) while developing locally.
+
+### Production Deployment
+
+1. **Login to Cloudflare:**
+   ```bash
+   cd workers/offchain-resolver
+   npx wrangler login
+   ```
+
+2. **Create D1 Database:**
+   ```bash
+   npx wrangler d1 create offchain_resolver_db
+   ```
+   Copy the `database_id` from the output.
+
+3. **Update `wrangler.toml`:**
+   Paste the `database_id` into the `[[d1_databases]]` section.
+
+4. **Run Migrations:**
+   ```bash
+   npm run migrate
+   ```
+
+5. **Deploy:**
+   ```bash
+   npm run deploy
+   ```
+
+6. **Update Frontend Config:**
+   Set `VITE_DMAIL_API_URL` in `frontend/.env.local` to your deployed worker URL (e.g. `https://dmail-resolver-xxx.workers.dev`).
 
 ## Run the Frontend
 
@@ -76,17 +112,42 @@ Vite serves the UI at `http://localhost:5173`.
 
 ## Using the UI
 
-1. **Connect wallet** — click 🔌, approve MetaMask, and the ENS name (or address) appears in the header.
-2. **Identity bootstrap** — the app derives an X25519 + Ed25519 keypair via `deriveIdentityFromWallet`, registers the public key with your resolver (if needed), and caches the result in `localStorage`. You can clear it via the ♻️ Regenerate button.
-3. **Inbox** — press 🔄 or “Refresh” to fetch mailbox entries from Filecoin storage (using Synapse fetch + resolver pointers). Signature badges show whether the sender envelope verified.
-4. **Compose** — enter an ENS name, the app resolves the recipient public key via resolver → ENS fallback, encrypts the payload and uploads envelopes + mailbox roots via Synapse.
-5. **Attachments & calendar** — attachments stream through Synapse; calendar events render in the sidebar with ICS export.
+1. **Connect wallet** — Click 🔌, approve MetaMask, and your ENS name (or address) appears in the header.
+2. **Identity bootstrap** — The app derives an X25519 + Ed25519 keypair via `deriveIdentityFromWallet`, registers the public key with the resolver (if needed), and caches the result in `localStorage`. You can clear it via the ♻️ Regenerate button.
+3. **Inbox** — Press 🔄 or "Refresh" to fetch mailbox entries. In default mode, entries come from Filecoin storage via resolver pointers. In "1 upload per email" mode, entries come from the off-chain resolver backend.
+4. **Compose** — Enter an ENS name, the app resolves the recipient public key via resolver → ENS fallback, encrypts the payload and uploads to Filecoin via Synapse.
+5. **Calendar** — View events in the sidebar or switch to full-page calendar view. Create events, share via ICS export.
+6. **Attachments** — Attachments stream through Synapse storage.
 
-## Identity & Resolver Notes
+## Features
+
+### Email Modes
+
+**Default Mode (Segmented Mailbox):**
+- Traditional segmented mailbox structure
+- Separate uploads for envelopes, mailbox segments, and roots
+- Full ENS integration with mailbox root pointers
+
+**1 Upload Per Email Mode (MVP):**
+- Enable with `VITE_DMAIL_ONE_UPLOAD_PER_EMAIL=true`
+- Each email results in exactly one Synapse upload (EmailPack format)
+- Mailbox index stored in off-chain resolver backend
+- Faster UX, cross-device sync via backend
+- Local fallback to `localStorage` if backend unavailable
+
+### Calendar
+
+- **Sidebar View**: Quick access to upcoming events
+- **Full Page View**: Monthly grid calendar (click 📅 Calendar in sidebar)
+- **Event Management**: Create, view, and share events
+- **ICS Export**: Export calendar events as `.ics` files
+
+### Identity & Resolver
 
 - Identities are deterministic per wallet: the same wallet always recreates the exact X25519/Ed25519 material client-side.
-- The derived bundle lives only in `localStorage:dmail_identity_v2:<domain>:<account>` until you regenerate or clear storage.
+- The derived bundle lives only in `localStorage:dmail_identity:<domain>:<account>` until you regenerate or clear storage.
 - Resolver registration only occurs when the stored public key differs from the derived one, preventing redundant MetaMask prompts.
+- Off-chain resolver provides fast, gas-free identity and mailbox lookups with ENS compatibility.
 
 ## Synapse Requirements
 
@@ -94,14 +155,14 @@ Vite serves the UI at `http://localhost:5173`.
 
 - Provide `VITE_FILECOIN_PRIVATE_KEY` **or** `VITE_FILECOIN_SESSION_KEY`.
 - Optional overrides: `VITE_FILECOIN_PROVIDER_ID`, `VITE_FILECOIN_DATASET_ID`, `VITE_FILECOIN_DATASET_CREATE_NEW`, `VITE_FILECOIN_WITH_CDN`, etc.
-- Upload metadata is tagged (`type=dmail-email`, `from`, `to`, etc.) so you can inspect jobs in the Synapse UI.
+- Upload metadata is tagged (`type=dmail-email-pack-v1`, `from`, `to`, etc.) so you can inspect jobs in the Synapse UI.
 
 ### CDN-enabled datasets
 
 1. In the Synapse dashboard (or via SDK) create a dataset with **With CDN = Yes**. Note the dataset ID/provider ID.
 2. Set the following env vars:
    - `FILECOIN_WITH_CDN=1` (or `VITE_FILECOIN_WITH_CDN=1` for frontend-only uploads) to request CDN-backed storage.
-   - `FILECOIN_REQUIRE_CDN=1` if you want the app to throw when the resolved dataset isn’t CDN-enabled.
+   - `FILECOIN_REQUIRE_CDN=1` if you want the app to throw when the resolved dataset isn't CDN-enabled.
    - `FILECOIN_DATASET_ID=<new id>` (optional) to pin uploads to that dataset. If omitted and `FILECOIN_REQUIRE_CDN=1`, the app will auto-create a CDN dataset.
 3. Restart `npm run dev`. The storage context now verifies `context.withCDN`; uploads fail fast if the provider doesn't support CDN.
 
@@ -117,11 +178,12 @@ npm run format   # prettier
 
 ## Troubleshooting
 
-- **Repeated MetaMask prompts** – identity derivation is cached per account + domain. If you still see prompts, clear `localStorage` or click ♻️ Regenerate.
-- **Resolver lookup fails** – ensure `VITE_DMAIL_API_URL` points to a running off-chain resolver service; the app falls back to ENS text records when available.
-- **Synapse auth errors** – double-check the Filecoin private key or session key plus RPC URL. Missing credentials throw `Synapse authentication missing`.
+- **Repeated MetaMask prompts** – Identity derivation is cached per account + domain. If you still see prompts, clear `localStorage` or click ♻️ Regenerate.
+- **Resolver lookup fails** – Ensure `VITE_DMAIL_API_URL` points to a running off-chain resolver service; the app falls back to ENS text records when available.
+- **Synapse auth errors** – Double-check the Filecoin private key or session key plus RPC URL. Missing credentials throw `Synapse authentication missing`.
+- **CORS errors** – Make sure your Cloudflare Worker is deployed and `VITE_DMAIL_API_URL` points to the correct worker URL.
+- **Database errors** – Ensure D1 migrations have been applied to your remote database (`npm run migrate` in `workers/offchain-resolver`).
 
 ---
 
-dMail v2 focuses exclusively on the modern client experience. Legacy CLI scripts, Hardhat configs, and documentation bundles were removed to keep the repo lean. Only the frontend and the shared `@dmail/core` helpers remain. Happy hacking!
-
+dMail is a fully client-side decentralized email experience. All encryption, identity derivation, and mailbox management happens in the browser. Happy hacking!
