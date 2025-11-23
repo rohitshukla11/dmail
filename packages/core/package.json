@@ -10,7 +10,8 @@
     "./synapse": "./src/synapse.js",
     "./ens": "./src/ens.js",
     "./mailbox": "./src/mailbox.js",
-    "./types": "./src/types.js"
+    "./types": "./src/types.js",
+    "./email-pack": "./src/email-pack.js"
   },
   "dependencies": {
     "@filoz/synapse-sdk": "^0.35.3",

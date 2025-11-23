@@ -9,12 +9,13 @@ import {
   fetchAttachment,
   synapseFetch,
   synapseUpload,
+  synapseUploadMany,
+  synapseUploadEmailPack,
   fetchMailboxIndex,
   createEmptyCalendar,
   appendCalendarEvent,
   loadCalendarFromCid as loadCalendarFromCidFile,
   persistCalendar,
-  setMailboxUploadResult,
   setMailboxRootToEns,
   getCalendarUploadResult,
   setCalendarUploadResult,
@@ -30,7 +31,8 @@ import {
   getMailboxEntries,
   ensureRegisteredIdentity,
   normalizeServiceUrl,
-  setStorageServiceUrl,
+  normalizeEmailPack,
+  normalizeEmailPackIndexEntry,
 } from '@dmail/core'
 
 import CalendarSidebar from './components/calendar/CalendarSidebar'
@@ -62,6 +64,105 @@ const safeJsonParse = (value, fallback) => {
   } catch {
     return fallback
   }
+}
+
+const EMAIL_PACK_INDEX_PREFIX = 'dmail:email-packs:'
+
+const parseBooleanFlag = (value) => {
+  if (value == null) return undefined
+  const normalized = String(value).trim().toLowerCase()
+  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true
+  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) return false
+  return undefined
+}
+
+const resolveOneUploadPerEmailFlag = () => {
+  const envCandidates = [
+    import.meta.env?.VITE_DMAIL_ONE_UPLOAD_PER_EMAIL,
+    import.meta.env?.DMAIL_ONE_UPLOAD_PER_EMAIL,
+  ]
+  for (const candidate of envCandidates) {
+    const parsed = parseBooleanFlag(candidate)
+    if (parsed != null) {
+      return parsed
+    }
+  }
+  if (typeof window !== 'undefined' && window.__DMAIL_CONFIG__) {
+    const browserCandidates = [
+      window.__DMAIL_CONFIG__.DMAIL_ONE_UPLOAD_PER_EMAIL,
+      window.__DMAIL_CONFIG__.VITE_DMAIL_ONE_UPLOAD_PER_EMAIL,
+    ]
+    for (const candidate of browserCandidates) {
+      const parsed = parseBooleanFlag(candidate)
+      if (parsed != null) {
+        return parsed
+      }
+    }
+  }
+  return false
+}
+
+const getEmailPackIndexStorageKey = (owner) => {
+  if (!owner) return null
+  return `${EMAIL_PACK_INDEX_PREFIX}${owner.toLowerCase()}`
+}
+
+const sanitizeEmailPackIndex = (owner, packs = []) => {
+  return {
+    owner: owner ?? null,
+    packs: (packs ?? []).map((entry) => normalizeEmailPackIndexEntry(entry)).filter(Boolean),
+  }
+}
+
+const loadEmailPackIndexFromStorage = (owner) => {
+  const key = getEmailPackIndexStorageKey(owner)
+  if (typeof window === 'undefined' || !key) {
+    return sanitizeEmailPackIndex(owner, [])
+  }
+  const stored = safeJsonParse(window.localStorage.getItem(key), null)
+  if (!stored || !Array.isArray(stored.packs)) {
+    return sanitizeEmailPackIndex(owner, [])
+  }
+  return sanitizeEmailPackIndex(owner, stored.packs)
+}
+
+const persistEmailPackIndexToStorage = (owner, index) => {
+  const key = getEmailPackIndexStorageKey(owner)
+  if (typeof window === 'undefined' || !key) {
+    return
+  }
+  const sanitized = sanitizeEmailPackIndex(owner, index?.packs ?? [])
+  window.localStorage.setItem(key, JSON.stringify(sanitized))
+}
+
+const deriveEmailPackEntries = (index, folder) => {
+  const normalizedFolder = folder === 'inbox' ? 'inbox' : 'sent'
+  if (!index || !Array.isArray(index.packs)) {
+    return []
+  }
+  const entries = []
+  index.packs.forEach((packEntry) => {
+    const normalized = normalizeEmailPackIndexEntry(packEntry)
+    if (!normalized) return
+    const hints = normalized.indexEntry?.folderHints ?? ['sent']
+    if (!hints.includes(normalizedFolder)) return
+    entries.push({
+      folder: normalizedFolder,
+      from: normalized.indexEntry?.from ?? normalized.indexEntry?.sender ?? normalized.indexEntry?.owner,
+      toRecipients: normalized.indexEntry?.to ?? [],
+      subjectPreview: normalized.indexEntry?.subjectPreview ?? '(No subject)',
+      timestamp: normalized.indexEntry?.timestamp ?? 0,
+      messageId: normalized.indexEntry?.messageId ?? normalized.messageId ?? normalized.cid,
+      attachments: normalized.indexEntry?.attachments ?? [],
+      _emailPackPointer: {
+        cid: normalized.cid,
+        pieceCid: normalized.pieceCid,
+        providerInfo: normalized.providerInfo,
+      },
+      indexEntry: normalized.indexEntry,
+    })
+  })
+  return entries.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
 }
 
 const getOutboxStorageKey = (address) => {
@@ -154,13 +255,19 @@ function getBrowserHostname() {
 
 
 function App() {
+  const appConfig = useMemo(
+    () => ({
+      oneUploadPerEmail: resolveOneUploadPerEmailFlag(),
+    }),
+    []
+  )
   const [walletAddress, setWalletAddress] = useState(null)
   const [ensName, setEnsName] = useState(null)
   const [provider, setProvider] = useState(null)
   const [statusMessage, setStatusMessage] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
   const [identityPublicKey, setIdentityPublicKey] = useState(null)
-  const [mailboxUploadResult, setMailboxUploadResultState] = useState(null)
+  const [, setMailboxUploadResultState] = useState(null)
   const [mailboxRoot, setMailboxRoot] = useState(null)
   const mailboxRootRef = useRef(null)
   const [mailboxEntries, setMailboxEntries] = useState([])
@@ -206,6 +313,17 @@ function App() {
   const identityMaterialRef = useRef(null)
   const identityEnsRef = useRef(null)
   const identityRegistrationCacheRef = useRef(readIdentityRegistrationCache())
+  const [emailPackIndex, setEmailPackIndex] = useState(null)
+  const emailPackIndexRef = useRef(null)
+  const emailPackOwner = useMemo(() => {
+    if (walletAddress) return walletAddress.toLowerCase()
+    if (ensName) return ensName.toLowerCase()
+    return null
+  }, [walletAddress, ensName])
+
+  useEffect(() => {
+    emailPackIndexRef.current = emailPackIndex
+  }, [emailPackIndex])
 
   const updateOutboxState = useCallback(
     (updater) => {
@@ -311,6 +429,91 @@ function App() {
     [updateOutboxState]
   )
   const requestOutboxProcessingRef = useRef(() => {})
+
+  const syncLocalEmailPackEntries = useCallback(
+    (nextIndex) => {
+      if (!appConfig.oneUploadPerEmail) return
+      const sanitized = sanitizeEmailPackIndex(emailPackOwner, nextIndex?.packs ?? [])
+      setMailboxEntries(deriveEmailPackEntries(sanitized, 'inbox'))
+      setSentEntries(deriveEmailPackEntries(sanitized, 'sent'))
+    },
+    [appConfig.oneUploadPerEmail, emailPackOwner]
+  )
+
+  const refreshLocalEmailPackIndex = useCallback(() => {
+    if (!appConfig.oneUploadPerEmail) {
+      return null
+    }
+    if (!emailPackOwner) {
+      const emptyIndex = sanitizeEmailPackIndex(null, [])
+      setEmailPackIndex(emptyIndex)
+      setMailboxEntries([])
+      setSentEntries([])
+      return emptyIndex
+    }
+    const loaded = loadEmailPackIndexFromStorage(emailPackOwner)
+    setEmailPackIndex(loaded)
+    syncLocalEmailPackEntries(loaded)
+    return loaded
+  }, [appConfig.oneUploadPerEmail, emailPackOwner, syncLocalEmailPackEntries])
+
+  const appendEmailPackEntry = useCallback(
+    (entry) => {
+      if (!appConfig.oneUploadPerEmail || !emailPackOwner) return
+      const normalized = normalizeEmailPackIndexEntry(entry)
+      if (!normalized) return
+      setEmailPackIndex((prev) => {
+        const base =
+          prev && prev.owner === emailPackOwner ? prev : sanitizeEmailPackIndex(emailPackOwner, prev?.packs ?? [])
+        const filtered = (base.packs ?? []).filter((pack) => {
+          const existingId = pack.messageId ?? pack.indexEntry?.messageId
+          return existingId !== normalized.messageId && existingId !== normalized.indexEntry?.messageId
+        })
+        const next = {
+          owner: emailPackOwner,
+          packs: [normalized, ...filtered],
+        }
+        persistEmailPackIndexToStorage(emailPackOwner, next)
+        syncLocalEmailPackEntries(next)
+        return next
+      })
+    },
+    [appConfig.oneUploadPerEmail, emailPackOwner, syncLocalEmailPackEntries]
+  )
+
+  const removeEmailPackEntries = useCallback(
+    (messageIds = []) => {
+      if (!appConfig.oneUploadPerEmail || !emailPackOwner || !messageIds.length) return
+      setEmailPackIndex((prev) => {
+        const base =
+          prev && prev.owner === emailPackOwner ? prev : sanitizeEmailPackIndex(emailPackOwner, prev?.packs ?? [])
+        const filtered = (base.packs ?? []).filter((pack) => {
+          const packMessageId = pack.messageId ?? pack.indexEntry?.messageId
+          return !messageIds.includes(packMessageId)
+        })
+        const next = {
+          owner: emailPackOwner,
+          packs: filtered,
+        }
+        persistEmailPackIndexToStorage(emailPackOwner, next)
+        syncLocalEmailPackEntries(next)
+        return next
+      })
+    },
+    [appConfig.oneUploadPerEmail, emailPackOwner, syncLocalEmailPackEntries]
+  )
+
+  useEffect(() => {
+    if (!appConfig.oneUploadPerEmail) {
+      return
+    }
+    refreshLocalEmailPackIndex()
+  }, [appConfig.oneUploadPerEmail, emailPackOwner, refreshLocalEmailPackIndex])
+  useEffect(() => {
+    if (!appConfig.oneUploadPerEmail) {
+      setEmailPackIndex(null)
+    }
+  }, [appConfig.oneUploadPerEmail])
 
   
   // Keep calendar upload result ref in sync with state
@@ -585,7 +788,7 @@ function App() {
       }
       return await deriveIdentityMaterial(targetEns)
     },
-    [deriveIdentityMaterial, ensName]
+    [deriveIdentityMaterial, ensName, walletAddress]
   )
 
   const handleRegenerateIdentity = useCallback(async () => {
@@ -740,6 +943,7 @@ function App() {
     setCalendarEvents([])
     setCalendarUploadResultState(null)
     setCalendarError('')
+    setEmailPackIndex(null)
     setStatusMessage('Wallet disconnected')
     setErrorMessage('')
   }, [walletAddress])
@@ -795,6 +999,25 @@ function App() {
   const refreshInbox = useCallback(async () => {
     setLoadingInbox(true)
     setErrorMessage('')
+    if (appConfig.oneUploadPerEmail) {
+      try {
+        const index = refreshLocalEmailPackIndex()
+        if (!emailPackOwner) {
+          setStatusMessage('Connect wallet to load local email packs')
+        } else {
+          const inboxCount = deriveEmailPackEntries(index, 'inbox').length
+          const sentCount = deriveEmailPackEntries(index, 'sent').length
+          const currentViewCount = activeView === 'sent' ? sentCount : inboxCount
+          const sectionName = activeView === 'sent' ? 'sent' : 'inbox'
+          setStatusMessage(`Loaded ${currentViewCount} ${sectionName} email pack(s) locally`)
+        }
+        setMailboxRoot(null)
+        setMailboxUploadResultState(null)
+      } finally {
+        setLoadingInbox(false)
+      }
+      return
+    }
     try {
       await ensureProvider()
       const ensProvider = await getEnsProvider()
@@ -871,7 +1094,17 @@ function App() {
     } finally {
       setLoadingInbox(false)
     }
-  }, [ensureProvider, ensName, getEnsProvider, walletAddress, annotateEntriesWithSignature, activeView])
+  }, [
+    activeView,
+    annotateEntriesWithSignature,
+    appConfig.oneUploadPerEmail,
+    emailPackOwner,
+    ensureProvider,
+    ensName,
+    getEnsProvider,
+    refreshLocalEmailPackIndex,
+    walletAddress,
+  ])
 
   const refreshCalendar = useCallback(async () => {
     if (!walletAddress && !ensName) return
@@ -939,6 +1172,44 @@ function App() {
       try {
         const folder = entry.folder ?? activeView ?? 'inbox'
         const isSentEntry = folder === 'sent'
+        
+        if (entry._emailPackPointer) {
+          const pointer = entry._emailPackPointer
+          if (!pointer.cid || !pointer.pieceCid || !pointer.providerInfo) {
+            throw new Error('Email pack is missing storage pointer information.')
+          }
+          setStatusMessage('Fetching email pack from storage...')
+          const packPayload = await synapseFetch(pointer.cid, {
+            as: 'json',
+            pieceCid: pointer.pieceCid,
+            providerInfo: pointer.providerInfo,
+          })
+          const normalizedPack = normalizeEmailPack(packPayload)
+          const envelopeCandidate = isSentEntry
+            ? normalizedPack.senderEnvelope ?? normalizedPack.recipientEnvelope
+            : normalizedPack.recipientEnvelope ?? normalizedPack.senderEnvelope
+          if (!envelopeCandidate) {
+            throw new Error('Email pack does not contain an encrypted envelope to decrypt.')
+          }
+          const decrypted = await decryptEmail(
+            envelopeCandidate,
+            {
+              identityPrivateKey: identityMaterialRef.current?.privateKey ?? null,
+              senderSecret: identityMaterialRef.current?.privateKey ?? null,
+            },
+            {
+              fetchAttachmentsFromSynapse: true,
+            }
+          )
+          setSelectedEmail({
+            entry,
+            decrypted,
+            encrypted: envelopeCandidate,
+            signatureValid: null,
+            emailPack: normalizedPack,
+          })
+          return
+        }
         
         // For inbox: use recipient envelope (bodyCid/keyEnvelopesCid)
         // For sent: use sender envelope (senderCopyCid/cidSender)
@@ -1239,6 +1510,16 @@ function App() {
     if (!confirmDelete) return
     
     try {
+      if (appConfig.oneUploadPerEmail) {
+        const selectedKeys = selectedEmails
+          .map((entry) => entry.messageId ?? entry.cid)
+          .filter(Boolean)
+        removeEmailPackEntries(selectedKeys)
+        setSelectedEmails([])
+        setSelectedEmail(null)
+        setStatusMessage(`Deleted ${selectedKeys.length} local email pack(s)`)
+        return
+      }
       setStatusMessage(`Deleting ${selectedEmails.length} email(s)...`)
       const browserProvider = await ensureProvider()
       const signer = await browserProvider.getSigner()
@@ -1336,7 +1617,6 @@ function App() {
         console.warn('[handleDeleteSelected] Failed to update ENS:', ensError)
       }
       
-      const count = activeView === 'sent' ? newSentEntries.length : newInboxEntries.length
       setStatusMessage(`Deleted ${selectedEmails.length} email(s). Refreshing...`)
       
       // Refresh to ensure UI is in sync with resolver/ENS
@@ -1347,7 +1627,20 @@ function App() {
       // Revert optimistic update on error
       await refreshInbox()
     }
-  }, [selectedEmails, activeView, mailboxEntries, sentEntries, ensName, walletAddress, ensureProvider, getEnsProvider, mailboxRootRef, refreshInbox])
+  }, [
+    activeView,
+    appConfig.oneUploadPerEmail,
+    ensureProvider,
+    ensName,
+    getEnsProvider,
+    mailboxEntries,
+    mailboxRootRef,
+    refreshInbox,
+    removeEmailPackEntries,
+    selectedEmails,
+    sentEntries,
+    walletAddress,
+  ])
 
   const handleSaveEvent = useCallback(
     async (eventInput) => {
@@ -1402,7 +1695,7 @@ function App() {
         setSavingEvent(false)
       }
     },
-    [calendarEvents, ensName, ensureProvider, getEnsProvider, provider, walletAddress]
+    [ensName, ensureProvider, getEnsProvider, provider, walletAddress]
   )
 
   const handleSend = useCallback(
@@ -1554,10 +1847,108 @@ function App() {
     ]
   )
 
+  const deliverEmailPackBatch = useCallback(
+    async (items) => {
+      if (!items || items.length === 0) {
+        return { itemResults: new Map(), ownerRoots: new Map() }
+      }
+      const ensProvider = await getEnsProvider()
+      const primarySenderEns =
+        ensName ??
+        items.find((candidate) => candidate?.senderEns)?.senderEns ??
+        (walletAddress ? await ensProvider.lookupAddress(walletAddress) : null)
+      const activeIdentity =
+        identityMaterialRef.current ?? (await ensureIdentityMaterial(primarySenderEns))
+      if (!activeIdentity?.signingKey || !activeIdentity?.signingPublicKey) {
+        throw new Error('Identity signing material missing. Reconnect wallet to derive identity again.')
+      }
+      const itemResults = new Map()
+      await Promise.all(
+        items.map(async (item) => {
+          try {
+            const senderEnsValue = item.senderEns ?? primarySenderEns
+            const recipientEnvelope = item.encryptedEnvelopes?.recipient
+            if (!senderEnsValue) {
+              throw new Error('Sender ENS not available. Reconnect wallet and try again.')
+            }
+            if (!recipientEnvelope) {
+              throw new Error('Outbox item missing recipient envelope payload.')
+            }
+            const toRecipients =
+              Array.isArray(item.metadata?.toRecipients) && item.metadata.toRecipients.length
+                ? item.metadata.toRecipients
+                : [item.recipientEns].filter(Boolean)
+            const ccRecipients = Array.isArray(item.metadata?.cc) ? item.metadata.cc : []
+            const messageId = item.metadata?.messageId ?? recipientEnvelope.messageId ?? item.id
+            const timestamp = item.timestamp ?? Date.now()
+            const subjectPreview = item.metadata?.subjectPreview ?? '(No subject)'
+            const folderHints = item.isSelfRecipient ? ['sent', 'inbox'] : ['sent']
+            const pack = {
+              version: 1,
+              messageId,
+              from: senderEnsValue,
+              to: toRecipients,
+              cc: ccRecipients,
+              timestamp,
+              recipientEnvelope,
+              senderEnvelope: item.encryptedEnvelopes?.sender ?? undefined,
+              attachments:
+                Array.isArray(item.metadata?.attachments) && item.metadata.attachments.length
+                  ? item.metadata.attachments.map((attachment) => ({
+                      name: attachment.filename ?? attachment.name ?? null,
+                      contentType: attachment.mimeType ?? attachment.contentType ?? undefined,
+                    }))
+                  : undefined,
+              indexEntry: {
+                subjectPreview,
+                from: senderEnsValue,
+                to: toRecipients,
+                timestamp,
+                messageId,
+                folderHints,
+                signerPublicKey: activeIdentity.signingPublicKey,
+              },
+            }
+            const uploadResult = await synapseUploadEmailPack(pack, {
+              metadata: {
+                owner: senderEnsValue,
+                messageId,
+                mode: 'one-upload-per-email',
+              },
+              filename: `email-pack-${messageId}.json`,
+            })
+            const pointer = {
+              messageId,
+              cid: uploadResult.cid,
+              pieceCid: uploadResult.pieceCid,
+              providerInfo: uploadResult.providerInfo ?? null,
+              indexEntry: pack.indexEntry,
+            }
+            itemResults.set(item.id, {
+              success: true,
+              packEntry: pointer,
+            })
+          } catch (error) {
+            console.error('[outbox] Failed to prepare email pack:', error)
+            itemResults.set(item.id, {
+              success: false,
+              errorMessage: error.message ?? 'Failed to upload email pack',
+            })
+          }
+        })
+      )
+      return { itemResults, ownerRoots: new Map() }
+    },
+    [ensureIdentityMaterial, ensName, getEnsProvider, walletAddress]
+  )
+
   const deliverOutboxBatch = useCallback(
     async (items) => {
       if (!items || items.length === 0) {
         return { itemResults: new Map(), ownerRoots: new Map() }
+      }
+      if (appConfig.oneUploadPerEmail) {
+        return deliverEmailPackBatch(items)
       }
       const browserProvider = await ensureProvider()
       const signer = await browserProvider.getSigner()
@@ -1575,6 +1966,8 @@ function App() {
       const itemStates = new Map()
       const folderGroups = new Map()
       const ownerContexts = new Map()
+      const envelopeUploadTasks = []
+      const preparedStates = []
 
       await Promise.all(
         items.map(async (item) => {
@@ -1601,29 +1994,9 @@ function App() {
               throw new Error('Outbox item missing recipient envelope payload.')
             }
             const uploadName = `${senderEnsValue}-${item.timestamp ?? Date.now()}`
-            const uploadPromises = [
-              synapseUpload(recipientEnvelope, {
-                filename: `email-${uploadName}.json`,
-                metadata: {
-                  type: 'dmail-email-recipient',
-                  messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
-                },
-              }),
-            ]
-            if (item.encryptedEnvelopes?.sender) {
-              uploadPromises.push(
-                synapseUpload(item.encryptedEnvelopes.sender, {
-                  filename: `email-${uploadName}-sent.json`,
-                  metadata: {
-                    type: 'dmail-email-sender',
-                    messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
-                  },
-                })
-              )
-            }
-            const [recipientUpload, senderUpload] = await Promise.all(uploadPromises)
             const toRecipients = item.metadata?.toRecipients ?? [recipientEnsValue]
             const ccRecipients = item.metadata?.cc ?? []
+            const messageId = item.metadata?.messageId ?? recipientEnvelope.messageId
             const entryMetadataBase = {
               from: senderEnsValue,
               to: recipientEnsValue,
@@ -1631,59 +2004,54 @@ function App() {
               cc: ccRecipients,
               timestamp: item.timestamp,
               subjectPreview: item.metadata?.subjectPreview ?? '(No subject)',
-              messageId: item.metadata?.messageId ?? recipientEnvelope.messageId,
+              messageId,
               attachments: item.metadata?.attachments ?? [],
               ephemeralPublicKey: recipientEnvelope.ephemeralPublicKey ?? null,
               signerPublicKey: activeIdentity.signingPublicKey,
-              bodyCid: recipientUpload?.cid ?? null,
-              keyEnvelopesCid: recipientUpload?.cid ?? null,
-              senderCopyCid: senderUpload?.cid ?? null,
             }
-
-            if (!entryMetadataBase.bodyCid || !entryMetadataBase.keyEnvelopesCid) {
-              throw new Error('Failed to compute envelope metadata for this message.')
-            }
-
-            const signatureMetadata = {
-              messageId: entryMetadataBase.messageId,
-              bodyCid: entryMetadataBase.bodyCid,
-              keyEnvelopesCid: entryMetadataBase.keyEnvelopesCid,
-              senderCopyCid: entryMetadataBase.senderCopyCid,
+            const signatureMetadataBase = {
+              messageId,
               from: senderEnsValue,
               to: toRecipients,
               cc: ccRecipients,
               timestamp: item.timestamp,
               ephemeralPublicKey: entryMetadataBase.ephemeralPublicKey ?? null,
             }
-            const metadataHash = computeEnvelopeMetadataHash(signatureMetadata)
-            const signature = signEnvelope(activeIdentity.signingKey, metadataHash)
-            const entryMetadata = {
-              ...entryMetadataBase,
-              signature,
+            const recipientLabel = `${item.id}:recipient`
+            envelopeUploadTasks.push({
+              label: recipientLabel,
+              data: recipientEnvelope,
+              filename: `email-${uploadName}.json`,
+              metadata: {
+                type: 'dmail-email-recipient',
+                messageId,
+              },
+            })
+            let senderLabel = null
+            if (item.encryptedEnvelopes?.sender) {
+              senderLabel = `${item.id}:sender`
+              envelopeUploadTasks.push({
+                label: senderLabel,
+                data: item.encryptedEnvelopes.sender,
+                filename: `email-${uploadName}-sent.json`,
+                metadata: {
+                  type: 'dmail-email-sender',
+                  messageId,
+                },
+              })
             }
-            const uploadsPayload = { recipient: recipientUpload, sender: senderUpload }
+            state.uploadKeys = { recipient: recipientLabel, sender: senderLabel }
+            state.entryMetadataBase = entryMetadataBase
+            state.signatureMetadataBase = signatureMetadataBase
+            preparedStates.push(state)
             const inboxKey = `${recipientEnsValue}:inbox`
             if (!folderGroups.has(inboxKey)) {
               folderGroups.set(inboxKey, { ownerEns: recipientEnsValue, type: 'inbox', items: [] })
             }
-            folderGroups.get(inboxKey).items.push({
-              ownerEns: recipientEnsValue,
-              type: 'inbox',
-              uploads: uploadsPayload,
-              metadata: entryMetadata,
-              itemId: item.id,
-            })
             const sentKey = `${senderEnsValue}:sent`
             if (!folderGroups.has(sentKey)) {
               folderGroups.set(sentKey, { ownerEns: senderEnsValue, type: 'sent', items: [] })
             }
-            folderGroups.get(sentKey).items.push({
-              ownerEns: senderEnsValue,
-              type: 'sent',
-              uploads: uploadsPayload,
-              metadata: { ...entryMetadata, folder: 'sent' },
-              itemId: item.id,
-            })
             if (!ownerContexts.has(recipientEnsValue)) {
               ownerContexts.set(recipientEnsValue, { mailboxRoot: null })
             }
@@ -1699,6 +2067,76 @@ function App() {
           }
         })
       )
+
+      const uploadResults = envelopeUploadTasks.length
+        ? await synapseUploadMany(envelopeUploadTasks)
+        : []
+      const uploadResultMap = new Map()
+      uploadResults.forEach((result) => {
+        if (result?.label != null) {
+          uploadResultMap.set(result.label, result)
+        }
+      })
+
+      preparedStates.forEach((state) => {
+        if (state.error) return
+        const recipientUpload = uploadResultMap.get(state.uploadKeys?.recipient)
+        if (!recipientUpload) {
+          state.error = new Error('Missing recipient upload result')
+          return
+        }
+        const senderUpload =
+          state.uploadKeys?.sender && uploadResultMap.has(state.uploadKeys.sender)
+            ? uploadResultMap.get(state.uploadKeys.sender)
+            : null
+        const entryMetadataBase = {
+          ...state.entryMetadataBase,
+          bodyCid: recipientUpload?.cid ?? null,
+          keyEnvelopesCid: recipientUpload?.cid ?? null,
+          senderCopyCid: senderUpload?.cid ?? null,
+        }
+
+        if (!entryMetadataBase.bodyCid || !entryMetadataBase.keyEnvelopesCid) {
+          state.error = new Error('Failed to compute envelope metadata for this message.')
+          return
+        }
+
+        const signatureMetadata = {
+          ...state.signatureMetadataBase,
+          bodyCid: entryMetadataBase.bodyCid,
+          keyEnvelopesCid: entryMetadataBase.keyEnvelopesCid,
+          senderCopyCid: entryMetadataBase.senderCopyCid,
+        }
+        const metadataHash = computeEnvelopeMetadataHash(signatureMetadata)
+        const signature = signEnvelope(activeIdentity.signingKey, metadataHash)
+        const entryMetadata = {
+          ...entryMetadataBase,
+          signature,
+        }
+        const uploadsPayload = { recipient: recipientUpload, sender: senderUpload }
+        const inboxKey = `${state.recipientEns}:inbox`
+        if (!folderGroups.has(inboxKey)) {
+          folderGroups.set(inboxKey, { ownerEns: state.recipientEns, type: 'inbox', items: [] })
+        }
+        folderGroups.get(inboxKey).items.push({
+          ownerEns: state.recipientEns,
+          type: 'inbox',
+          uploads: uploadsPayload,
+          metadata: entryMetadata,
+          itemId: state.item.id,
+        })
+        const sentKey = `${state.senderEns}:sent`
+        if (!folderGroups.has(sentKey)) {
+          folderGroups.set(sentKey, { ownerEns: state.senderEns, type: 'sent', items: [] })
+        }
+        folderGroups.get(sentKey).items.push({
+          ownerEns: state.senderEns,
+          type: 'sent',
+          uploads: uploadsPayload,
+          metadata: { ...entryMetadata, folder: 'sent' },
+          itemId: state.item.id,
+        })
+      })
 
       for (const [ownerEns, context] of ownerContexts.entries()) {
         let resolvedRoot = null
@@ -1810,7 +2248,15 @@ function App() {
         ownerRoots,
       }
     },
-    [ensureIdentityMaterial, ensureProvider, ensName, getEnsProvider, walletAddress]
+    [
+      appConfig.oneUploadPerEmail,
+      deliverEmailPackBatch,
+      ensureIdentityMaterial,
+      ensureProvider,
+      ensName,
+      getEnsProvider,
+      walletAddress,
+    ]
   )
 
   const processOutboxQueue = useCallback(async () => {
@@ -1843,22 +2289,31 @@ function App() {
       pendingItems.forEach((item) => {
         const result = delivery.itemResults.get(item.id)
         if (result?.success) {
-          removeOutboxItem(item.id)
-          if (result.senderEntry) {
-            setSentEntries((prev) => {
-              const filtered = (prev ?? []).filter(
-                (entry) => entry.messageId !== result.senderEntry?.messageId
-              )
-              return [result.senderEntry, ...filtered]
+          if (appConfig.oneUploadPerEmail && result.packEntry) {
+            patchOutboxItem(item.id, {
+              status: 'sent',
+              deliveryResult: result.packEntry,
             })
-          }
-          if (item.isSelfRecipient && result.recipientEntry) {
-            setMailboxEntries((prev) => {
-              const filtered = (prev ?? []).filter(
-                (entry) => entry.messageId !== result.recipientEntry?.messageId
-              )
-              return [result.recipientEntry, ...filtered]
-            })
+            appendEmailPackEntry(result.packEntry)
+            removeOutboxItem(item.id)
+          } else {
+            removeOutboxItem(item.id)
+            if (result.senderEntry) {
+              setSentEntries((prev) => {
+                const filtered = (prev ?? []).filter(
+                  (entry) => entry.messageId !== result.senderEntry?.messageId
+                )
+                return [result.senderEntry, ...filtered]
+              })
+            }
+            if (item.isSelfRecipient && result.recipientEntry) {
+              setMailboxEntries((prev) => {
+                const filtered = (prev ?? []).filter(
+                  (entry) => entry.messageId !== result.recipientEntry?.messageId
+                )
+                return [result.recipientEntry, ...filtered]
+              })
+            }
           }
         } else {
           patchOutboxItem(item.id, {
@@ -1867,13 +2322,15 @@ function App() {
           })
         }
       })
-      const selfOwnerEns =
-        ensName ?? pendingItems.find((item) => item.senderEns)?.senderEns ?? null
-      if (selfOwnerEns) {
-        const latestRoot = delivery.ownerRoots.get(selfOwnerEns)
-        if (latestRoot) {
-          mailboxRootRef.current = latestRoot
-          setMailboxRoot(latestRoot)
+      if (!appConfig.oneUploadPerEmail) {
+        const selfOwnerEns =
+          ensName ?? pendingItems.find((item) => item.senderEns)?.senderEns ?? null
+        if (selfOwnerEns) {
+          const latestRoot = delivery.ownerRoots.get(selfOwnerEns)
+          if (latestRoot) {
+            mailboxRootRef.current = latestRoot
+            setMailboxRoot(latestRoot)
+          }
         }
       }
       setStatusMessage('Queued emails delivered successfully')
@@ -1891,6 +2348,8 @@ function App() {
       outboxProcessingRef.current = false
     }
   }, [
+    appConfig.oneUploadPerEmail,
+    appendEmailPackEntry,
     deliverOutboxBatch,
     ensName,
     patchOutboxItem,

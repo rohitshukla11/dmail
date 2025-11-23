@@ -2,6 +2,7 @@
 import {
   synapseFetch,
   synapseUpload,
+  synapseUploadMany,
   normalizeServiceUrl,
   getStorageServiceUrl,
   setStorageServiceUrl,
@@ -293,6 +294,7 @@ async function convertLegacyMailboxToSegmented({
   const rootDoc = createEmptyMailboxRootDocument(ownerEns)
   let hasLegacyData = false
 
+  const allSegmentDocs = []
   for (const folder of ['inbox', 'sent']) {
     const pointer = getMailboxIndexPointer(normalizedRoot, folder)
     if (!pointer?.cid) continue
@@ -308,11 +310,44 @@ async function convertLegacyMailboxToSegmented({
         entries: chunk,
         segmentId: generateSegmentId(folder),
       })
-      const uploadResult = await persistMailboxSegment(segmentDoc, {
-        owner: ownerEns,
-        type: folder,
-        ...(persistOptions ?? {}),
-      })
+      allSegmentDocs.push({ segmentDoc, folder })
+    }
+  }
+  
+  // Batch upload all segments at once
+  if (allSegmentDocs.length > 0) {
+    const segmentUploadTasks = allSegmentDocs.map(({ segmentDoc, folder }) => ({
+      data: JSON.stringify(sanitizeForJson(segmentDoc), null, 2),
+      filename: `${SEGMENT_FILENAME_PREFIX}-${folder}-${segmentDoc.segmentId}.json`,
+      metadata: {
+        type: `dmail-mailbox-segment-${folder}`,
+        owner: ownerEns ?? 'unknown',
+        segmentId: segmentDoc.segmentId,
+        ...(persistOptions?.metadata ?? {}),
+      },
+      label: `legacy-${folder}-${segmentDoc.segmentId}`,
+    }))
+    
+    const segmentUploadResults = await synapseUploadMany(segmentUploadTasks, {
+      metadata: {
+        owner: ownerEns ?? 'unknown',
+        ...(persistOptions?.metadata ?? {}),
+      },
+    })
+    
+    const uploadResultMap = new Map()
+    segmentUploadResults.forEach((result) => {
+      if (result?.label) {
+        uploadResultMap.set(result.label, result)
+      }
+    })
+    
+    for (const { segmentDoc, folder } of allSegmentDocs) {
+      const label = `legacy-${folder}-${segmentDoc.segmentId}`
+      const uploadResult = uploadResultMap.get(label)
+      if (!uploadResult) {
+        throw new Error(`Missing upload result for legacy segment ${segmentDoc.segmentId}`)
+      }
       rootDoc[getSegmentsKey(folder)].push(buildSegmentPointerFromUpload(uploadResult, segmentDoc))
     }
   }
@@ -474,19 +509,43 @@ async function appendEntriesToSegments({
   }
 
   const dirtyStates = Array.from(dirtySegments.values())
-  const segmentUploadResults = await Promise.all(
-    dirtyStates.map(async (state) => {
-      const uploadResult = await persistMailboxSegment(state.doc, {
-        owner: ownerEns,
-        type,
-        ...(persistOptions ?? {}),
+  
+  // Batch all segment uploads into a single synapseUploadMany call
+  const segmentUploadTasks = dirtyStates.map((state) => ({
+    data: JSON.stringify(sanitizeForJson(state.doc), null, 2),
+    filename: `${SEGMENT_FILENAME_PREFIX}-${state.doc.type}-${state.doc.segmentId}.json`,
+    metadata: {
+      type: `dmail-mailbox-segment-${state.doc.type}`,
+      owner: state.doc.owner ?? ownerEns ?? 'unknown',
+      segmentId: state.doc.segmentId,
+      ...(persistOptions?.metadata ?? {}),
+    },
+    label: `segment-${state.doc.segmentId}`,
+  }))
+  
+  const segmentUploadResults = segmentUploadTasks.length > 0
+    ? await synapseUploadMany(segmentUploadTasks, {
+        metadata: {
+          owner: ownerEns ?? 'unknown',
+          ...(persistOptions?.metadata ?? {}),
+        },
       })
-      return { state, uploadResult }
-    })
-  )
+    : []
+  
+  const uploadResultMap = new Map()
+  segmentUploadResults.forEach((result) => {
+    if (result?.label) {
+      uploadResultMap.set(result.label, result)
+    }
+  })
 
   const segmentUploads = []
-  for (const { state, uploadResult } of segmentUploadResults) {
+  for (const state of dirtyStates) {
+    const label = `segment-${state.doc.segmentId}`
+    const uploadResult = uploadResultMap.get(label)
+    if (!uploadResult) {
+      throw new Error(`Missing upload result for segment ${state.doc.segmentId}`)
+    }
     const pointer = segments[state.pointerIndex]
     pointer.cid = uploadResult.cid
     pointer.pieceCid = uploadResult.pieceCid

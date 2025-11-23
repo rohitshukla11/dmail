@@ -1,5 +1,6 @@
 import pino from 'pino'
 import { Synapse } from '@filoz/synapse-sdk'
+import { EMAIL_PACK_METADATA_TYPE } from './email-pack.js'
 
 const textEncoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null
 const textDecoder = typeof TextDecoder !== 'undefined' ? new TextDecoder() : null
@@ -218,44 +219,123 @@ function normalizeMetadata(metadata = {}) {
   return normalized
 }
 
-export async function synapseUpload(data, options = {}) {
-  const payload = await toUint8Array(data)
-  const filename = options.filename ?? `dmail-${Date.now()}.json`
-  const contentType = options.contentType ?? 'application/json'
+export async function synapseUploadMany(payloads = [], globalOptions = {}) {
+  if (!Array.isArray(payloads) || payloads.length === 0) {
+    return []
+  }
+
+  const normalizedPayloads = payloads
+    .map((payload, index) => {
+      if (!payload || payload.data == null) {
+        return null
+      }
+      return {
+        data: payload.data,
+        filename: payload.filename ?? globalOptions.filename ?? `dmail-${Date.now()}-${index}.json`,
+        contentType: payload.contentType ?? globalOptions.contentType ?? 'application/json',
+        metadata: payload.metadata ?? globalOptions.metadata ?? {},
+        label: payload.label ?? null,
+      }
+    })
+    .filter(Boolean)
+
+  if (normalizedPayloads.length === 0) {
+    return []
+  }
 
   const context = await getStorageContext()
   const datasetId = context.dataSetId
   const withCdn = context.withCDN
-  
+
   if (datasetId) {
-    console.log(`[Synapse] Uploading to dataset ID: ${datasetId} (CDN: ${withCdn ? 'enabled' : 'disabled'})`)
+    console.log(
+      `[Synapse] Bulk uploading ${normalizedPayloads.length} piece(s) to dataset ID: ${datasetId} (CDN: ${
+        withCdn ? 'enabled' : 'disabled'
+      })`
+    )
+  } else {
+    console.log(
+      `[Synapse] Bulk uploading ${normalizedPayloads.length} piece(s) with auto-selected dataset (CDN: ${
+        withCdn ? 'enabled' : 'disabled'
+      })`
+    )
   }
-  
-  const uploadResult = await context.upload(payload, {
-    metadata: normalizeMetadata({
-      filename,
-      contentType,
-      ...options.metadata,
-    }),
+
+  const finalDatasetIdBefore = context.dataSetId
+
+  const uploadResults = await Promise.all(
+    normalizedPayloads.map(async (payload) => {
+      const bytes = await toUint8Array(payload.data)
+      const metadata = normalizeMetadata({
+        filename: payload.filename,
+        contentType: payload.contentType,
+        ...payload.metadata,
+      })
+      const result = await context.upload(bytes, {
+        metadata,
+      })
+      const normalizedProviderInfo = normalizeProviderInfo(context.provider)
+      return {
+        cid: result.pieceCid.toString(),
+        pieceCid: result.pieceCid.toString(),
+        providerInfo: normalizedProviderInfo,
+        dataSetId: context.dataSetId ?? finalDatasetIdBefore ?? null,
+        result,
+        label: payload.label,
+      }
+    })
+  )
+
+  const finalDatasetId = context.dataSetId ?? finalDatasetIdBefore
+  if (finalDatasetId && finalDatasetId !== finalDatasetIdBefore) {
+    console.log(
+      `[Synapse] Bulk upload complete. Dataset ID: ${finalDatasetId} (CDN: ${context.withCDN ? 'enabled' : 'disabled'})`
+    )
+  }
+
+  return uploadResults
+}
+
+export async function synapseUpload(data, options = {}) {
+  const [result] = await synapseUploadMany(
+    [
+      {
+        data,
+        filename: options.filename,
+        contentType: options.contentType,
+        metadata: options.metadata,
+      },
+    ],
+    options
+  )
+  if (!result) {
+    throw new Error('synapseUpload: Upload failed or no data provided')
+  }
+  return result
+}
+
+export async function synapseUploadEmailPack(emailPack, options = {}) {
+  if (!emailPack || typeof emailPack !== 'object') {
+    throw new Error('synapseUploadEmailPack: emailPack must be an object')
+  }
+
+  const filename =
+    options?.filename ??
+    `email-pack-${emailPack.messageId ?? Date.now().toString(36)}.json`
+
+  const metadata = normalizeMetadata({
+    type: EMAIL_PACK_METADATA_TYPE,
+    owner: emailPack.from ?? options?.metadata?.owner ?? 'unknown',
+    messageId: emailPack.messageId ?? '',
+    ...(options?.metadata ?? {}),
   })
 
-  const finalDatasetId = context.dataSetId ?? datasetId
-  if (finalDatasetId && finalDatasetId !== datasetId) {
-    console.log(`[Synapse] Upload completed. Dataset ID: ${finalDatasetId} (CDN: ${context.withCDN ? 'enabled' : 'disabled'})`)
-  }
-
-  // Normalize providerInfo URLs to use CDN /piece endpoint
-  const normalizedProviderInfo = normalizeProviderInfo(context.provider)
-  
-  console.log(`[Synapse] Normalized provider serviceURL: ${getStorageServiceUrl(normalizedProviderInfo)}`)
-
-  return {
-    cid: uploadResult.pieceCid.toString(),
-    pieceCid: uploadResult.pieceCid.toString(),
-    providerInfo: normalizedProviderInfo,
-    dataSetId: finalDatasetId ?? null,
-    result: uploadResult,
-  }
+  return synapseUpload(emailPack, {
+    ...options,
+    filename,
+    contentType: options.contentType ?? 'application/json',
+    metadata,
+  })
 }
 
 function normalizeServiceUrl(url) {
