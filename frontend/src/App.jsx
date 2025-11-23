@@ -39,6 +39,7 @@ import {
 
 import CalendarSidebar from './components/calendar/CalendarSidebar'
 import EventModal from './components/calendar/EventModal'
+import CalendarView from './components/calendar/CalendarView'
 
 import './App.css'
 import { clearIdentityCache, getOrCreateIdentityCached } from './utils/identityCache'
@@ -2669,6 +2670,17 @@ function App() {
               <span className="nav-label">Sent</span>
               <span className="nav-count">{sentEntries.length + outboxEntries.length}</span>
             </button>
+            <button
+              className={activeView === 'calendar' ? 'nav-item active' : 'nav-item'}
+              onClick={() => {
+                setActiveView('calendar')
+                setSelectedEmails([])
+              }}
+            >
+              <span className="nav-icon">📅</span>
+              <span className="nav-label">Calendar</span>
+              <span className="nav-count">{calendarEvents.length}</span>
+            </button>
             <button className="nav-item" onClick={() => alert('Not implemented')}>
               <span className="nav-icon">📝</span>
               <span className="nav-label">Drafts</span>
@@ -2714,42 +2726,54 @@ function App() {
           </div>
         </aside>
 
-        {/* Email List */}
+        {/* Email List / Calendar View */}
         <main className={`gmail-main ${calendarFullPage ? 'hidden' : ''}`}>
-          <div className="toolbar">
-            <div className="toolbar-left">
-              <input 
-                type="checkbox" 
-                className="select-all" 
-                checked={selectedEmails.length > 0 && selectedEmails.length === filteredEmails.length}
-                onChange={toggleSelectAll}
-                title="Select/Deselect all"
-              />
-              <button className="toolbar-btn" title="Refresh" onClick={refreshInbox}>
-                ↻
-              </button>
-              {selectedEmails.length > 0 && (
-                <button 
-                  className="toolbar-btn delete-btn" 
-                  title={`Delete ${selectedEmails.length} email(s)`} 
-                  onClick={handleDeleteSelected}
-                >
-                  🗑️ Delete ({selectedEmails.length})
-                </button>
-              )}
-              {activeView === 'sent' && outboxEntries.length > 0 && (
-                <button
-                  className="toolbar-btn warning-btn"
-                  title="Discard all queued emails"
-                  onClick={handleDiscardOutboxItems}
-                >
-                  🧹 Clear queued ({outboxEntries.length})
-                </button>
-              )}
-            </div>
-          </div>
+          {activeView === 'calendar' ? (
+            <CalendarView
+              events={calendarEvents}
+              onAddEvent={() => setShowEventModal(true)}
+              onEventClick={(event) => {
+                // You can add event detail modal here if needed
+                console.log('Event clicked:', event)
+              }}
+              loading={calendarLoading}
+            />
+          ) : (
+            <>
+              <div className="toolbar">
+                <div className="toolbar-left">
+                  <input 
+                    type="checkbox" 
+                    className="select-all" 
+                    checked={selectedEmails.length > 0 && selectedEmails.length === filteredEmails.length}
+                    onChange={toggleSelectAll}
+                    title="Select/Deselect all"
+                  />
+                  <button className="toolbar-btn" title="Refresh" onClick={refreshInbox}>
+                    ↻
+                  </button>
+                  {selectedEmails.length > 0 && (
+                    <button 
+                      className="toolbar-btn delete-btn" 
+                      title={`Delete ${selectedEmails.length} email(s)`} 
+                      onClick={handleDeleteSelected}
+                    >
+                      🗑️ Delete ({selectedEmails.length})
+                    </button>
+                  )}
+                  {activeView === 'sent' && outboxEntries.length > 0 && (
+                    <button
+                      className="toolbar-btn warning-btn"
+                      title="Discard all queued emails"
+                      onClick={handleDiscardOutboxItems}
+                    >
+                      🧹 Clear queued ({outboxEntries.length})
+                    </button>
+                  )}
+                </div>
+              </div>
 
-          <div className="email-list">
+              <div className="email-list">
             {loadingInbox ? (
               <div className="empty-state">Loading inbox...</div>
             ) : filteredEmails.length === 0 ? (
@@ -2820,7 +2844,9 @@ function App() {
                 )
               })
             )}
-          </div>
+              </div>
+            </>
+          )}
         </main>
 
         {/* Email Viewer */}

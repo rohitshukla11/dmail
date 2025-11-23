@@ -28,24 +28,28 @@ type MailboxRow = {
 
 const allowedFolders = new Set(['inbox', 'sent'])
 
-const corsHeaders = (env: Env, extra: Record<string, string> = {}) => ({
-  'Content-Type': 'application/json',
-  'Access-Control-Allow-Origin': env.CORS_ALLOW_ORIGIN ?? '*',
-  'Access-Control-Allow-Headers': 'content-type',
-  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-  ...extra,
-})
+const corsHeaders = (env: Env, extra: HeadersInit = {}) => {
+  const headers = new Headers(extra)
+  headers.set('Access-Control-Allow-Origin', env.CORS_ALLOW_ORIGIN ?? '*')
+  headers.set('Access-Control-Allow-Headers', 'content-type, authorization')
+  headers.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+  headers.set('Access-Control-Max-Age', '86400')
+  if (!headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+  return headers
+}
 
 const jsonResponse = (env: Env, data: unknown, init: ResponseInit = {}) =>
   new Response(JSON.stringify(data), {
     ...init,
-    headers: corsHeaders(env, init.headers as Record<string, string>),
+    headers: corsHeaders(env, init.headers),
   })
 
 const noContent = (env: Env, init: ResponseInit = {}) =>
   new Response(null, {
     ...init,
-    headers: corsHeaders(env, init.headers as Record<string, string>),
+    headers: corsHeaders(env, init.headers),
   })
 
 async function readJson<T>(request: Request): Promise<T | null> {
@@ -134,9 +138,10 @@ async function handleIdentityGet(identifier: string, env: Env) {
     | IdentityRow
     | null
   if (!row) {
-    return jsonResponse(env, { error: 'not found' }, { status: 404 })
+    return jsonResponse(env, { found: false, identifier: normalized })
   }
   return jsonResponse(env, {
+    found: true,
     identifier: row.identifier,
     wallet: row.wallet,
     x25519PublicKey: row.x25519PublicKey,
@@ -258,36 +263,48 @@ const safeJsonParse = <T>(input: string | null | undefined, fallback: T): T => {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url)
-    const { pathname } = url
+    try {
+      const url = new URL(request.url)
+      const { pathname } = url
 
-    if (request.method === 'OPTIONS') {
-      return noContent(env, { status: 204 })
+      if (request.method === 'OPTIONS') {
+        return noContent(env, { status: 204 })
+      }
+
+      if (pathname === '/v1/identity/register' && request.method === 'POST') {
+        return handleIdentityRegister(request, env)
+      }
+
+      if (pathname.startsWith('/v1/identity/') && request.method === 'GET') {
+        const identifier = pathname.replace('/v1/identity/', '')
+        return handleIdentityGet(identifier, env)
+      }
+
+      if (pathname === '/v1/mailbox/append' && request.method === 'POST') {
+        return handleMailboxAppend(request, env)
+      }
+
+      if (pathname === '/v1/mailbox/index' && request.method === 'GET') {
+        return handleMailboxIndex(url, env)
+      }
+
+      if (pathname.startsWith('/.well-known/ens/') && request.method === 'GET') {
+        const ensName = pathname.replace('/.well-known/ens/', '')
+        return handleEnsWellKnown(ensName, env)
+      }
+
+      return jsonResponse(env, { error: 'not found' }, { status: 404 })
+    } catch (error) {
+      console.error('[worker] unhandled error', error)
+      return jsonResponse(
+        env,
+        {
+          error: 'internal_error',
+          message: error instanceof Error ? error.message : String(error),
+        },
+        { status: 500 }
+      )
     }
-
-    if (pathname === '/v1/identity/register' && request.method === 'POST') {
-      return handleIdentityRegister(request, env)
-    }
-
-    if (pathname.startsWith('/v1/identity/') && request.method === 'GET') {
-      const identifier = pathname.replace('/v1/identity/', '')
-      return handleIdentityGet(identifier, env)
-    }
-
-    if (pathname === '/v1/mailbox/append' && request.method === 'POST') {
-      return handleMailboxAppend(request, env)
-    }
-
-    if (pathname === '/v1/mailbox/index' && request.method === 'GET') {
-      return handleMailboxIndex(url, env)
-    }
-
-    if (pathname.startsWith('/.well-known/ens/') && request.method === 'GET') {
-      const ensName = pathname.replace('/.well-known/ens/', '')
-      return handleEnsWellKnown(ensName, env)
-    }
-
-    return jsonResponse(env, { error: 'not found' }, { status: 404 })
   },
 }
 
