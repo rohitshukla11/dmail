@@ -983,11 +983,6 @@ function App() {
   // Update status message when view changes to show section-specific count
   useEffect(() => {
     if (!walletAddress) return
-    const currentCount = activeView === 'sent' ? sentEntries.length : mailboxEntries.length
-    const sectionName = activeView === 'sent' ? 'sent' : 'inbox'
-    if (currentCount > 0) {
-      setStatusMessage(`Loaded ${currentCount} ${sectionName} email(s)`)
-    }
   }, [activeView, mailboxEntries.length, sentEntries.length, walletAddress])
 
   useEffect(() => {
@@ -1146,9 +1141,6 @@ function App() {
               setSentEntries(sentEntriesList)
               const inboxCount = inboxEntriesList.length
               const sentCount = sentEntriesList.length
-              const currentViewCount = activeView === 'sent' ? sentCount : inboxCount
-              const sectionName = activeView === 'sent' ? 'sent' : 'inbox'
-              setStatusMessage(`Loaded ${currentViewCount} ${sectionName} email pack(s)`)
               setMailboxRoot(null)
               setMailboxUploadResultState(null)
               
@@ -1172,12 +1164,6 @@ function App() {
           const index = refreshLocalEmailPackIndex()
           if (!ownerIdentifier) {
             setStatusMessage('Connect wallet to load email packs')
-          } else {
-            const inboxCount = deriveEmailPackEntries(index, 'inbox').length
-            const sentCount = deriveEmailPackEntries(index, 'sent').length
-            const currentViewCount = activeView === 'sent' ? sentCount : inboxCount
-            const sectionName = activeView === 'sent' ? 'sent' : 'inbox'
-            setStatusMessage(`Loaded ${currentViewCount} ${sectionName} email pack(s)`)
           }
           setMailboxRoot(null)
           setMailboxUploadResultState(null)
@@ -1248,9 +1234,6 @@ function App() {
       
       const inboxCount = inboxEntriesList.length
       const sentCount = sentEntriesList.length
-      const currentViewCount = activeView === 'sent' ? sentCount : inboxCount
-      const sectionName = activeView === 'sent' ? 'sent' : 'inbox'
-      setStatusMessage(`Loaded ${currentViewCount} ${sectionName} email(s)`)
     } catch (error) {
       console.error(error)
       setErrorMessage(error.message ?? 'Failed to load mailbox')
@@ -1492,7 +1475,10 @@ function App() {
         })
         const entryFolder = entry.folder ?? (activeView || 'inbox')
         if (entryFolder === 'inbox') {
-          markMessageAsRead(entry.messageId ?? entry.cid ?? entry._outboxId ?? null)
+          const entryId = entry.messageId ?? entry.cid ?? entry._outboxId ?? null
+          if (entryId) {
+            markMessageAsRead(entryId)
+          }
         }
         setStatusMessage('')
       } catch (error) {
@@ -2493,6 +2479,7 @@ function App() {
     try {
       setStatusMessage(`Delivering ${pendingItems.length} queued email(s)...`)
       const delivery = await deliverOutboxBatch(pendingItems)
+      let shouldRefreshInbox = false
       pendingItems.forEach((item) => {
         const result = delivery.itemResults.get(item.id)
         if (result?.success) {
@@ -2503,6 +2490,7 @@ function App() {
             })
             appendEmailPackEntry(result.packEntry)
             removeOutboxItem(item.id)
+            shouldRefreshInbox = true
           } else {
             removeOutboxItem(item.id)
             if (result.senderEntry) {
@@ -2529,6 +2517,9 @@ function App() {
           })
         }
       })
+      if (appConfig.oneUploadPerEmail && shouldRefreshInbox) {
+        void refreshInbox()
+      }
       if (!appConfig.oneUploadPerEmail) {
         const selfOwnerEns =
           ensName ?? pendingItems.find((item) => item.senderEns)?.senderEns ?? null
@@ -2559,6 +2550,7 @@ function App() {
     appendEmailPackEntry,
     deliverOutboxBatch,
     ensName,
+    refreshInbox,
     patchOutboxItem,
     refreshOutboxLock,
     releaseOutboxLock,
@@ -2754,8 +2746,8 @@ function App() {
         </div>
       </header>
 
-      {/* Status Messages - filter out wallet connection status since it's in navbar */}
-      {statusMessage && statusMessage !== 'Wallet connected' && (
+      {/* Status Messages - filter out wallet connection status since it's in navbar, hide in calendar view */}
+      {statusMessage && statusMessage !== 'Wallet connected' && activeView !== 'calendar' && (
         <div className="toast toast-success">{statusMessage}</div>
       )}
       {errorMessage && <div className="toast toast-error">{errorMessage}</div>}
@@ -2804,6 +2796,7 @@ function App() {
               onClick={() => {
                 setActiveView('calendar')
                 setSelectedEmails([])
+                setStatusMessage('')
               }}
             >
               <span className="nav-icon">📅</span>
@@ -2954,19 +2947,19 @@ function App() {
                     />
                     <span className="email-star">☆</span>
                     <span className="email-sender">{entry.from || 'Unknown'}</span>
-                    <span className="email-subject">
-                      {entry.subjectPreview || '(No subject)'}
-                      {isInboxEntry && isRead ? (
-                        <span className="read-receipt" title="Read receipt">
-                          ✓
-                        </span>
-                      ) : null}
-                      {statusLabel && (
-                        <span className={`email-status-badge status-${entry.status ?? 'pending'}`}>
-                          {statusLabel}
-                        </span>
-                      )}
-                    </span>
+              <span className="email-subject">
+                {entry.subjectPreview || '(No subject)'}
+                {!isOutbox && entry._signatureValid ? (
+                  <span className="signature-badge signature-valid" title="Signature verified">
+                    ✓
+                  </span>
+                ) : null}
+                {!isInboxEntry && statusLabel && (
+                  <span className={`email-status-badge status-${entry.status ?? 'pending'}`}>
+                    {statusLabel}
+                  </span>
+                )}
+              </span>
                     <span className="email-time">{formatTime(entry.timestamp)}</span>
                     {isOutbox && entry.status === 'error' && (
                       <button

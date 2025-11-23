@@ -176,6 +176,37 @@ npm run lint     # eslint across the repo
 npm run format   # prettier
 ```
 
+## Deploy to Vercel
+
+The repository ships with a `vercel.json` so Vercel knows how to build the Vite frontend from the monorepo root.
+
+1. **Install the Vercel CLI (optional):**
+   ```bash
+   npm install -g vercel
+   vercel login
+   ```
+2. **Create a project** (via dashboard or CLI) that points to this repository.
+3. **Configure build settings** (already provided by `vercel.json`):
+   - Install Command: `npm install`
+   - Build Command: `npm run build --workspace frontend`
+   - Output Directory: `frontend/dist`
+4. **Set environment variables** in the project settings (or `vercel env`):
+   - All `VITE_*` variables you use locally, e.g.
+     - `VITE_ETH_RPC_URL`
+     - `VITE_SEPOLIA_RPC_URL`
+     - `VITE_FILECOIN_PRIVATE_KEY` or `VITE_FILECOIN_SESSION_KEY`
+     - `VITE_FILECOIN_RPC_URL`
+     - `VITE_FILECOIN_GATEWAY`
+     - `VITE_DMAIL_API_URL`
+     - `VITE_DMAIL_ONE_UPLOAD_PER_EMAIL` (optional)
+     - `VITE_RECIPIENT_PUBLIC_KEY` (optional fallback)
+5. **Deploy:**
+   ```bash
+   vercel --prod
+   ```
+
+The SPA rewrite in `vercel.json` ensures every route serves `index.html`. The frontend still expects the off-chain resolver backend to be reachable at `VITE_DMAIL_API_URL`, so make sure the Cloudflare Worker is deployed before directing users to the Vercel-hosted UI.
+
 ## Troubleshooting
 
 - **Repeated MetaMask prompts** – Identity derivation is cached per account + domain. If you still see prompts, clear `localStorage` or click ♻️ Regenerate.
