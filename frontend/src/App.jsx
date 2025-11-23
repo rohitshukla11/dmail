@@ -66,6 +66,17 @@ const safeJsonParse = (value, fallback) => {
   }
 }
 
+const serializeForStorage = (value) => {
+  try {
+    return JSON.stringify(value, (_, candidate) =>
+      typeof candidate === 'bigint' ? candidate.toString() : candidate
+    )
+  } catch (error) {
+    console.warn('[storage] Failed to serialize payload, falling back to empty array', error)
+    return '[]'
+  }
+}
+
 const EMAIL_PACK_INDEX_PREFIX = 'dmail:email-packs:'
 
 const parseBooleanFlag = (value) => {
@@ -132,7 +143,7 @@ const persistEmailPackIndexToStorage = (owner, index) => {
     return
   }
   const sanitized = sanitizeEmailPackIndex(owner, index?.packs ?? [])
-  window.localStorage.setItem(key, JSON.stringify(sanitized))
+  window.localStorage.setItem(key, serializeForStorage(sanitized))
 }
 
 const deriveEmailPackEntries = (index, folder) => {
@@ -190,7 +201,7 @@ const saveOutboxToStorage = (address, items) => {
   if (typeof window === 'undefined') return
   const key = getOutboxStorageKey(address)
   if (!key) return
-  window.localStorage.setItem(key, JSON.stringify(items ?? []))
+  window.localStorage.setItem(key, serializeForStorage(items ?? []))
 }
 
 const clearOutboxStorage = (address) => {
@@ -228,7 +239,7 @@ function writeIdentityRegistrationCache(cache) {
   if (typeof window === 'undefined') return
   const storage = window.localStorage
   try {
-    storage.setItem(IDENTITY_REGISTRATION_CACHE_KEY, JSON.stringify(cache))
+    storage.setItem(IDENTITY_REGISTRATION_CACHE_KEY, serializeForStorage(cache))
   } catch (error) {
     console.warn('Failed to persist identity registration cache', error)
   }
@@ -1009,7 +1020,7 @@ function App() {
           const sentCount = deriveEmailPackEntries(index, 'sent').length
           const currentViewCount = activeView === 'sent' ? sentCount : inboxCount
           const sectionName = activeView === 'sent' ? 'sent' : 'inbox'
-          setStatusMessage(`Loaded ${currentViewCount} ${sectionName} email pack(s) locally`)
+          setStatusMessage(`Loaded ${currentViewCount} ${sectionName} email pack(s)`)
         }
         setMailboxRoot(null)
         setMailboxUploadResultState(null)
@@ -1913,7 +1924,6 @@ function App() {
               metadata: {
                 owner: senderEnsValue,
                 messageId,
-                mode: 'one-upload-per-email',
               },
               filename: `email-pack-${messageId}.json`,
             })
