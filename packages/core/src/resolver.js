@@ -22,9 +22,11 @@ function getEnv(name) {
 
 function getResolverBaseUrl() {
   return (
+    getEnv('DMAIL_API_URL') ??
     getEnv('RESOLVER_API_URL') ??
     getEnv('RESOLVER_URL') ??
     getEnv('OFFCHAIN_RESOLVER_URL') ??
+    getEnv('VITE_DMAIL_API_URL') ??
     getEnv('VITE_RESOLVER_API_URL') ??
     getEnv('VITE_RESOLVER_URL') ??
     null
@@ -85,6 +87,35 @@ async function resolverRequest(path, { method = 'GET', body, signal, headers = {
     console.warn('[resolver] failed to parse response', error)
     return null
   }
+}
+
+async function fetchIdentityRecord(identifier, options = {}) {
+  const normalized = normalizeIdentifierInput(identifier)
+  if (!normalized) return null
+  return await resolverRequest(`/v1/identity/${encodeURIComponent(normalized)}`, {
+    signal: options.signal,
+  })
+}
+
+export async function appendRemoteMailboxEntry(entry, options = {}) {
+  return await resolverRequest('/v1/mailbox/append', {
+    method: 'POST',
+    body: entry,
+    signal: options.signal,
+  })
+}
+
+export async function fetchRemoteMailboxIndex(owner, folder, options = {}) {
+  const normalizedOwner = normalizeIdentifierInput(owner)
+  if (!normalizedOwner) return null
+  if (!folder) return null
+  const query = new URLSearchParams({
+    owner: normalizedOwner,
+    folder,
+  })
+  return await resolverRequest(`/v1/mailbox/index?${query.toString()}`, {
+    signal: options.signal,
+  })
 }
 
 async function safeReadBody(response) {
@@ -176,6 +207,10 @@ export async function registerResolverProfile(profile, options = {}) {
 }
 
 export async function resolvePublicKey(identifier, options = {}) {
+  const offchainIdentity = await fetchIdentityRecord(identifier, options)
+  if (offchainIdentity?.x25519PublicKey) {
+    return offchainIdentity.x25519PublicKey
+  }
   const profile = await fetchResolverProfile(identifier, options)
   if (profile?.encryptionPublicKey) {
     return profile.encryptionPublicKey
@@ -281,6 +316,7 @@ export async function ensureRegisteredIdentity(ensName, publicKeyBase64, signer,
   const payload = {
     ens: ensName,
     publicKey: publicKeyBase64,
+    signingPublicKey: options.signingPublicKey,
     network: getNetworkLabel(),
     timestamp: new Date().toISOString(),
     purpose: 'dmail-identity-registration-v1',
@@ -293,13 +329,25 @@ export async function ensureRegisteredIdentity(ensName, publicKeyBase64, signer,
   const payloadString = JSON.stringify(canonical)
   const signature = await signer.signMessage(payloadString)
   const address = await signer.getAddress()
+
+  const body = {
+    payload,
+    signature,
+    address,
+  }
+
+  const offchainResponse = await resolverRequest('/v1/identity/register', {
+    method: 'POST',
+    body,
+    signal: options.signal,
+  })
+  if (offchainResponse) {
+    return { registered: true, resolverResponse: offchainResponse }
+  }
+
   const response = await resolverRequest('/identity/register', {
     method: 'POST',
-    body: {
-      payload,
-      signature,
-      address,
-    },
+    body,
     signal: options.signal,
   })
   return { registered: true, resolverResponse: response }

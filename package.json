@@ -5,7 +5,8 @@
   "description": "dMail — Decentralized Email using Filecoin Onchain Cloud + ENS",
   "workspaces": [
     "frontend",
-    "packages/*"
+    "packages/*",
+    "workers/*"
   ],
   "scripts": {
     "dev": "npm run dev --workspace frontend",
@@ -18,7 +19,8 @@
     "eslint": "^8.57.0",
     "prettier": "^3.3.3",
     "ts-node": "^10.9.2",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "wrangler": "^4.50.0"
   },
   "license": "MIT"
 }

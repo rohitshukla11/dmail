@@ -1,0 +1,21 @@
+{
+  "name": "@dmail/offchain-resolver",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --minify",
+    "start": "wrangler dev",
+    "migrate": "wrangler d1 migrations apply offchain_resolver_db"
+  },
+  "dependencies": {
+    "ethers": "^6.13.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250115.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^3.90.0"
+  }
+}
+

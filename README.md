@@ -9,8 +9,9 @@ dMail v2 is a purely client-side mail experience:
 ## Repository Layout
 
 ```
-frontend/        Vite + React app (connect wallet, read inbox, compose, calendar)
-packages/core/   Shared helpers consumed by the frontend (`@dmail/core`)
+frontend/                 Vite + React app (connect wallet, read inbox, compose, calendar)
+packages/core/            Shared helpers consumed by the frontend (`@dmail/core`)
+workers/offchain-resolver Cloudflare Worker + D1 DB for identity + mailbox metadata
 ```
 
 ## Prerequisites
@@ -43,14 +44,27 @@ VITE_FILECOIN_PRIVATE_KEY=0x...
 VITE_FILECOIN_RPC_URL=https://api.calibration.node.glif.io/rpc/v1
 VITE_FILECOIN_GATEWAY=https://w3s.link/ipfs
 
-# Resolver API (stores identity pubkeys + mailbox roots)
-VITE_RESOLVER_API_URL=https://resolver.example/api
+# Off-chain API (Cloudflare Worker for identities + mailbox index)
+VITE_DMAIL_API_URL=https://resolver.example/api
 
 # Optional fallback recipient key when ENS/resolver lookup fails
 VITE_RECIPIENT_PUBLIC_KEY=
 ```
 
 `packages/core/src/synapse.js` documents every supported `FILECOIN_*` variable if you need provider IDs, datasets, or warm storage overrides.
+
+## Off-chain Resolver Worker
+
+The Cloudflare Worker that stores identity records and mailbox indexes lives in `workers/offchain-resolver`.
+
+```bash
+cd workers/offchain-resolver
+npm install
+wrangler d1 migrations apply offchain_resolver_db --local
+npm run dev
+```
+
+Set `VITE_DMAIL_API_URL` to the worker URL (e.g. `http://127.0.0.1:8787`) while developing locally. Production deployments should point to the Cloudflare worker domain.
 
 ## Run the Frontend
 
@@ -104,7 +118,7 @@ npm run format   # prettier
 ## Troubleshooting
 
 - **Repeated MetaMask prompts** – identity derivation is cached per account + domain. If you still see prompts, clear `localStorage` or click ♻️ Regenerate.
-- **Resolver lookup fails** – ensure `VITE_RESOLVER_API_URL` points to a running resolver service; the app falls back to ENS text records when available.
+- **Resolver lookup fails** – ensure `VITE_DMAIL_API_URL` points to a running off-chain resolver service; the app falls back to ENS text records when available.
 - **Synapse auth errors** – double-check the Filecoin private key or session key plus RPC URL. Missing credentials throw `Synapse authentication missing`.
 
 ---

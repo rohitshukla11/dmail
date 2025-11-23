@@ -1,0 +1,14 @@
+name = "dmail-offchain-resolver"
+main = "src/index.ts"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+CORS_ALLOW_ORIGIN = "*"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "offchain_resolver_db"
+database_id = "30bf3c01-7513-47e3-993a-3e6e4d1fb9c0"
+migrations_dir = "migrations"
+

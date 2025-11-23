@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   appendInboxEntriesBatch,
   appendSentEntriesBatch,
+  appendRemoteMailboxEntry,
   decryptEmail,
   encryptEmail,
   fetchAttachment,
@@ -33,6 +34,7 @@ import {
   normalizeServiceUrl,
   normalizeEmailPack,
   normalizeEmailPackIndexEntry,
+  fetchRemoteMailboxIndex,
 } from '@dmail/core'
 
 import CalendarSidebar from './components/calendar/CalendarSidebar'
@@ -174,6 +176,28 @@ const deriveEmailPackEntries = (index, folder) => {
     })
   })
   return entries.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+}
+
+const transformRemoteMailboxEntries = (entries, folder) => {
+  if (!Array.isArray(entries)) {
+    return []
+  }
+  const normalizedFolder = folder === 'sent' ? 'sent' : 'inbox'
+  return entries.map((entry) => ({
+    folder: normalizedFolder,
+    from: entry.from ?? entry.owner ?? 'unknown',
+    toRecipients: Array.isArray(entry.to) ? entry.to : [],
+    subjectPreview: entry.subjectPreview ?? '(No subject)',
+    timestamp: entry.timestamp ?? 0,
+    messageId: entry.messageId ?? entry.cid,
+    attachments: entry.attachments ?? [],
+    _emailPackPointer: {
+      cid: entry.cid,
+      pieceCid: entry.pieceCid,
+      providerInfo: entry.providerInfo ?? null,
+    },
+    indexEntry: entry,
+  }))
 }
 
 const getOutboxStorageKey = (address) => {
@@ -706,7 +730,9 @@ function App() {
             console.warn('Resolver lookup failed while checking identity registration', lookupError)
           }
         }
-        await ensureRegisteredIdentity(targetEns, derivedIdentity.x25519PublicBase64, signer)
+        await ensureRegisteredIdentity(targetEns, derivedIdentity.x25519PublicBase64, signer, {
+          signingPublicKey: derivedIdentity.signingPublicKeyBase64,
+        })
         markIdentityRegistered(targetEns, derivedIdentity.x25519PublicBase64)
         return true
       } catch (registrationError) {
@@ -1010,33 +1036,58 @@ function App() {
   const refreshInbox = useCallback(async () => {
     setLoadingInbox(true)
     setErrorMessage('')
-    if (appConfig.oneUploadPerEmail) {
-      try {
-        const index = refreshLocalEmailPackIndex()
-        if (!emailPackOwner) {
-          setStatusMessage('Connect wallet to load local email packs')
-        } else {
-          const inboxCount = deriveEmailPackEntries(index, 'inbox').length
-          const sentCount = deriveEmailPackEntries(index, 'sent').length
-          const currentViewCount = activeView === 'sent' ? sentCount : inboxCount
-          const sectionName = activeView === 'sent' ? 'sent' : 'inbox'
-          setStatusMessage(`Loaded ${currentViewCount} ${sectionName} email pack(s)`)
-        }
-        setMailboxRoot(null)
-        setMailboxUploadResultState(null)
-      } finally {
-        setLoadingInbox(false)
-      }
-      return
-    }
     try {
+      if (appConfig.oneUploadPerEmail) {
+        const ownerIdentifier = ensName ?? walletAddress ?? null
+        let remoteLoaded = false
+        if (ownerIdentifier) {
+          try {
+            const [remoteInbox, remoteSent] = await Promise.all([
+              fetchRemoteMailboxIndex(ownerIdentifier, 'inbox'),
+              fetchRemoteMailboxIndex(ownerIdentifier, 'sent'),
+            ])
+            if (remoteInbox || remoteSent) {
+              remoteLoaded = true
+              const inboxEntriesList = transformRemoteMailboxEntries(remoteInbox ?? [], 'inbox')
+              const sentEntriesList = transformRemoteMailboxEntries(remoteSent ?? [], 'sent')
+              setMailboxEntries(inboxEntriesList)
+              setSentEntries(sentEntriesList)
+              const inboxCount = inboxEntriesList.length
+              const sentCount = sentEntriesList.length
+              const currentViewCount = activeView === 'sent' ? sentCount : inboxCount
+              const sectionName = activeView === 'sent' ? 'sent' : 'inbox'
+              setStatusMessage(`Loaded ${currentViewCount} ${sectionName} email pack(s)`)
+              setMailboxRoot(null)
+              setMailboxUploadResultState(null)
+              return
+            }
+          } catch (remoteError) {
+            console.warn('[refreshInbox] Remote mailbox fetch failed, falling back to local index', remoteError)
+          }
+        }
+        if (!remoteLoaded) {
+          const index = refreshLocalEmailPackIndex()
+          if (!ownerIdentifier) {
+            setStatusMessage('Connect wallet to load email packs')
+          } else {
+            const inboxCount = deriveEmailPackEntries(index, 'inbox').length
+            const sentCount = deriveEmailPackEntries(index, 'sent').length
+            const currentViewCount = activeView === 'sent' ? sentCount : inboxCount
+            const sectionName = activeView === 'sent' ? 'sent' : 'inbox'
+            setStatusMessage(`Loaded ${currentViewCount} ${sectionName} email pack(s)`)
+          }
+          setMailboxRoot(null)
+          setMailboxUploadResultState(null)
+          return
+        }
+      }
+
       await ensureProvider()
       const ensProvider = await getEnsProvider()
       const targetEns =
         ensName ?? (walletAddress ? await ensProvider.lookupAddress(walletAddress) : null)
       const ownerIdentifier = targetEns ?? walletAddress
       
-      // Fetch mailbox root from resolver (with ENS fallback)
       console.log('[refreshInbox] Fetching mailbox root for:', ownerIdentifier)
       const mailboxRootResponse = await resolveMailboxRoot(ownerIdentifier, {
         provider: ensProvider,
@@ -1089,11 +1140,9 @@ function App() {
         mailboxRoot: normalizedRoot,
       })
       
-      // Use only the loaded entries (no merging with old data)
       setMailboxEntries(inboxEntriesList)
       setSentEntries(sentEntriesList)
       
-      // Show section-specific count based on active view
       const inboxCount = inboxEntriesList.length
       const sentCount = sentEntriesList.length
       const currentViewCount = activeView === 'sent' ? sentCount : inboxCount
@@ -1109,9 +1158,8 @@ function App() {
     activeView,
     annotateEntriesWithSignature,
     appConfig.oneUploadPerEmail,
-    emailPackOwner,
-    ensureProvider,
     ensName,
+    ensureProvider,
     getEnsProvider,
     refreshLocalEmailPackIndex,
     walletAddress,
@@ -1936,6 +1984,22 @@ function App() {
               pieceCid: uploadResult.pieceCid,
               providerInfo: uploadResult.providerInfo ?? null,
               indexEntry: pack.indexEntry,
+            }
+            try {
+              await appendRemoteMailboxEntry({
+                owner: senderEnsValue,
+                messageId,
+                cid: pointer.cid,
+                pieceCid: pointer.pieceCid,
+                providerInfo: pointer.providerInfo,
+                folderHints,
+                timestamp,
+                subjectPreview,
+                to: toRecipients,
+                from: senderEnsValue,
+              })
+            } catch (remoteAppendError) {
+              console.warn('[outbox] Failed to append mailbox pointer to backend', remoteAppendError)
             }
             itemResults.set(item.id, {
               success: true,
