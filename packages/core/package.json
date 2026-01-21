@@ -2,16 +2,17 @@
   "name": "@dmail/core",
   "version": "0.1.0",
   "type": "module",
-  "main": "src/index.js",
-  "module": "src/index.js",
+  "main": "src/index.ts",
+  "module": "src/index.ts",
+  "types": "src/index.ts",
   "exports": {
-    ".": "./src/index.js",
-    "./crypto": "./src/crypto.js",
-    "./synapse": "./src/synapse.js",
-    "./ens": "./src/ens.js",
-    "./mailbox": "./src/mailbox.js",
-    "./types": "./src/types.js",
-    "./email-pack": "./src/email-pack.js"
+    ".": "./src/index.ts",
+    "./crypto": "./src/crypto.ts",
+    "./synapse": "./src/synapse.ts",
+    "./ens": "./src/ens.ts",
+    "./mailbox": "./src/mailbox.ts",
+    "./types": "./src/types.ts",
+    "./email-pack": "./src/email-pack.ts"
   },
   "dependencies": {
     "@filoz/synapse-sdk": "^0.35.3",

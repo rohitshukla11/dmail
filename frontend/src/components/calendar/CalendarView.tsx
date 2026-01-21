@@ -1,7 +1,23 @@
 import { useState, useMemo } from 'react'
-import PropTypes from 'prop-types'
 
-function CalendarView({ events, onAddEvent, onEventClick, loading }) {
+export type CalendarEvent = {
+  id: string
+  title: string
+  description?: string
+  location?: string
+  startTime: string
+  endTime: string
+  attendees?: string[]
+}
+
+export type CalendarViewProps = {
+  events: CalendarEvent[]
+  onAddEvent: () => void
+  onEventClick: (event: CalendarEvent) => void
+  loading: boolean
+}
+
+function CalendarView({ events, onAddEvent, onEventClick, loading }: CalendarViewProps) {
   const [currentDate, setCurrentDate] = useState(new Date())
 
   // Get calendar grid data
@@ -26,7 +42,7 @@ function CalendarView({ events, onAddEvent, onEventClick, loading }) {
 
   // Group events by date
   const eventsByDate = useMemo(() => {
-    const grouped = {}
+    const grouped: Record<string, CalendarEvent[]> = {}
     events.forEach((event) => {
       if (!event.startTime) return
       const eventDate = new Date(event.startTime)
@@ -38,7 +54,7 @@ function CalendarView({ events, onAddEvent, onEventClick, loading }) {
     })
     // Sort events by start time within each date
     Object.keys(grouped).forEach((key) => {
-      grouped[key].sort((a, b) => new Date(a.startTime) - new Date(b.startTime))
+      grouped[key].sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime())
     })
     return grouped
   }, [events])
@@ -113,7 +129,7 @@ function CalendarView({ events, onAddEvent, onEventClick, loading }) {
     })
   }
 
-  const formatEventTime = (event) => {
+  const formatEventTime = (event: CalendarEvent): string => {
     const start = new Date(event.startTime)
     const end = event.endTime ? new Date(event.endTime) : null
     const timeStr = start.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
@@ -200,27 +216,6 @@ function CalendarView({ events, onAddEvent, onEventClick, loading }) {
   )
 }
 
-CalendarView.propTypes = {
-  events: PropTypes.arrayOf(
-    PropTypes.shape({
-      id: PropTypes.string,
-      title: PropTypes.string,
-      startTime: PropTypes.string,
-      endTime: PropTypes.string,
-      location: PropTypes.string,
-      attendees: PropTypes.arrayOf(PropTypes.string),
-    })
-  ),
-  onAddEvent: PropTypes.func.isRequired,
-  onEventClick: PropTypes.func,
-  loading: PropTypes.bool,
-}
-
-CalendarView.defaultProps = {
-  events: [],
-  loading: false,
-  onEventClick: null,
-}
 
 export default CalendarView
 

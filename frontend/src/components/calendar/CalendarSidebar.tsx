@@ -1,6 +1,6 @@
-import PropTypes from 'prop-types'
+import type { CalendarEvent } from './CalendarView'
 
-function formatEventTime(event) {
+function formatEventTime(event: CalendarEvent): string {
   if (!event?.startTime) return 'No start time'
   const start = new Date(event.startTime)
   const end = event.endTime ? new Date(event.endTime) : null
@@ -13,6 +13,17 @@ function formatEventTime(event) {
   return `${startLabel} → ${end.toLocaleString(undefined, options)}`
 }
 
+export type CalendarSidebarProps = {
+  events: CalendarEvent[]
+  loading: boolean
+  error?: string
+  onRefresh: () => void
+  onAddEvent: () => void
+  onShareEvent: (event: CalendarEvent) => void
+  fullPage: boolean
+  onToggleFullPage: () => void
+}
+
 export default function CalendarSidebar({
   events,
   loading,
@@ -22,7 +33,7 @@ export default function CalendarSidebar({
   onShareEvent,
   fullPage,
   onToggleFullPage,
-}) {
+}: CalendarSidebarProps) {
   const sortedEvents = [...events]
     .sort((a, b) => new Date(a.startTime) - new Date(b.startTime))
     .slice(0, fullPage ? undefined : 10)
@@ -90,30 +101,4 @@ export default function CalendarSidebar({
   )
 }
 
-CalendarSidebar.propTypes = {
-  events: PropTypes.arrayOf(
-    PropTypes.shape({
-      id: PropTypes.string,
-      title: PropTypes.string,
-      startTime: PropTypes.string,
-      endTime: PropTypes.string,
-      location: PropTypes.string,
-      attendees: PropTypes.arrayOf(PropTypes.string),
-    })
-  ),
-  loading: PropTypes.bool,
-  error: PropTypes.string,
-  onRefresh: PropTypes.func.isRequired,
-  onAddEvent: PropTypes.func.isRequired,
-  onShareEvent: PropTypes.func.isRequired,
-  fullPage: PropTypes.bool,
-  onToggleFullPage: PropTypes.func.isRequired,
-}
-
-CalendarSidebar.defaultProps = {
-  events: [],
-  loading: false,
-  error: '',
-  fullPage: false,
-}
 

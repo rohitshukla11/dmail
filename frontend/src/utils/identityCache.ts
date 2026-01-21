@@ -1,25 +1,37 @@
 import { deriveIdentityFromWallet } from '@dmail/core'
+import type { Signer } from 'ethers'
+
+export interface IdentityMaterial {
+  x25519PrivateBase64: string
+  x25519PublicBase64: string
+  senderStaticSymKeyBase64: string
+  signingKeyBase64: string
+  signingPublicKeyBase64: string
+}
 
 const IDENTITY_STORAGE_KEY_PREFIX = 'dmail_identity_v2'
-const identityInflightPromises = new Map()
+const identityInflightPromises = new Map<string, Promise<IdentityMaterial>>()
 
-function hasLocalStorage() {
+function hasLocalStorage(): boolean {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
 }
 
-function getIdentityStorageKey(account, domain) {
+function getIdentityStorageKey(account: string | null | undefined, domain: string | null | undefined): string {
   const safeAccount = account ? account.toLowerCase() : 'unknown'
   const safeDomain = domain || 'unknown'
   return `${IDENTITY_STORAGE_KEY_PREFIX}:${safeDomain}:${safeAccount}`
 }
 
-export function readIdentityFromStorage(account, domain) {
+export function readIdentityFromStorage(
+  account: string | null | undefined,
+  domain: string | null | undefined
+): IdentityMaterial | null {
   if (!hasLocalStorage()) return null
   const key = getIdentityStorageKey(account, domain)
   try {
     const raw = window.localStorage.getItem(key)
     if (!raw) return null
-    return JSON.parse(raw)
+    return JSON.parse(raw) as IdentityMaterial
   } catch (error) {
     console.warn('Failed to parse cached identity', error)
     window.localStorage.removeItem(key)
@@ -27,7 +39,11 @@ export function readIdentityFromStorage(account, domain) {
   }
 }
 
-export function writeIdentityToStorage(account, domain, identityObj) {
+export function writeIdentityToStorage(
+  account: string | null | undefined,
+  domain: string | null | undefined,
+  identityObj: IdentityMaterial
+): void {
   if (!hasLocalStorage()) return
   const key = getIdentityStorageKey(account, domain)
   try {
@@ -37,7 +53,10 @@ export function writeIdentityToStorage(account, domain, identityObj) {
   }
 }
 
-export function clearIdentityCache(account, domain) {
+export function clearIdentityCache(
+  account?: string | null | undefined,
+  domain?: string | null | undefined
+): void {
   if (!hasLocalStorage()) return
   const storage = window.localStorage
   if (account || domain) {
@@ -55,7 +74,17 @@ export function clearIdentityCache(account, domain) {
   }
 }
 
-export async function getOrCreateIdentityCached({ signer, account, domain }) {
+export interface GetOrCreateIdentityOptions {
+  signer: Signer
+  account: string | null | undefined
+  domain?: string | null | undefined
+}
+
+export async function getOrCreateIdentityCached({
+  signer,
+  account,
+  domain,
+}: GetOrCreateIdentityOptions): Promise<IdentityMaterial> {
   if (!signer) {
     throw new Error('Signer is required to derive identity')
   }
@@ -65,7 +94,7 @@ export async function getOrCreateIdentityCached({ signer, account, domain }) {
     return cached
   }
   if (identityInflightPromises.has(key)) {
-    return identityInflightPromises.get(key)
+    return identityInflightPromises.get(key)!
   }
   const promise = deriveIdentityFromWallet(signer, { domain })
     .then((identity) => {

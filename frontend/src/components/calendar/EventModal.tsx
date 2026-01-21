@@ -1,5 +1,20 @@
-import { useState } from 'react'
-import PropTypes from 'prop-types'
+import { useState, FormEvent, ChangeEvent } from 'react'
+
+interface CalendarEvent {
+  title: string
+  description: string
+  location: string
+  startTime: string
+  endTime: string
+  attendees: string[]
+  timezone: string
+}
+
+interface EventModalProps {
+  onClose: () => void
+  onSave: (event: CalendarEvent) => void
+  saving?: boolean
+}
 
 const initialState = {
   title: '',
@@ -10,7 +25,7 @@ const initialState = {
   attendees: '',
 }
 
-export default function EventModal({ onClose, onSave, saving }) {
+export default function EventModal({ onClose, onSave, saving = false }: EventModalProps) {
   const [form, setForm] = useState(initialState)
   const [error, setError] = useState('')
 
@@ -20,7 +35,7 @@ export default function EventModal({ onClose, onSave, saving }) {
     onClose()
   }
 
-  const handleChange = (event) => {
+  const handleChange = (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const { name, value } = event.target
     setForm((prev) => ({
       ...prev,
@@ -28,7 +43,7 @@ export default function EventModal({ onClose, onSave, saving }) {
     }))
   }
 
-  const handleSubmit = (event) => {
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event?.preventDefault()
     setError('')
 
@@ -142,13 +157,4 @@ export default function EventModal({ onClose, onSave, saving }) {
   )
 }
 
-EventModal.propTypes = {
-  onClose: PropTypes.func.isRequired,
-  onSave: PropTypes.func.isRequired,
-  saving: PropTypes.bool,
-}
-
-EventModal.defaultProps = {
-  saving: false,
-}
 

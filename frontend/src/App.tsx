@@ -1,5 +1,88 @@
 // dMail v2 UI update: use append-only mailbox indexes + resolver roots.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Signer, BrowserProvider } from 'ethers'
+
+interface IdentityMaterial {
+  x25519PrivateBase64: string
+  x25519PublicBase64: string
+  senderStaticSymKeyBase64: string
+  signingKeyBase64: string
+  signingPublicKeyBase64: string
+}
+
+interface EmailPayload {
+  from: string
+  to: string
+  timestamp?: number
+  subject: string
+  message: string
+  attachments?: Array<{
+    filename: string
+    mimeType: string
+    data: string
+  }>
+}
+
+interface EncryptedEmail {
+  version: string
+  scheme: string
+  messageId: string
+  fromEns: string
+  toEns: string
+  timestamp: number
+  recipientEnvelope?: unknown
+  senderEnvelope?: unknown | null
+  preview?: {
+    subject: string
+    snippet: string
+    attachments: number
+  }
+}
+
+interface DecryptedEmail {
+  from: string
+  to: string
+  timestamp: number
+  subject: string
+  message: string
+  attachments: Array<{
+    filename: string
+    mimeType: string
+    data: string
+  }>
+}
+
+interface MailboxEntry {
+  cid?: string
+  timestamp: number
+  from: string
+  to?: string
+  subjectPreview?: string | null
+  folder?: 'inbox' | 'sent'
+  messageId?: string
+  attachments?: unknown[]
+  toRecipients?: string[]
+  _emailPackPointer?: unknown
+  indexEntry?: unknown
+  _signatureValid?: boolean | null
+}
+
+interface SynapseUploadResult {
+  cid: string
+  pieceCid?: string
+  providerInfo?: unknown
+}
+
+interface CalendarEvent {
+  id: string
+  title: string
+  description?: string
+  location?: string
+  startTime: string
+  endTime: string
+  attendees?: string[]
+  timezone?: string
+}
 
 import {
   appendInboxEntriesBatch,
@@ -51,18 +134,40 @@ const OUTBOX_LOCK_PREFIX = 'dmail:outbox-lock:'
 const OUTBOX_POLL_INTERVAL_MS = 5000
 const OUTBOX_LOCK_TTL_MS = 10_000
 
-const normalizeOutboxItem = (item) => {
-  if (!item || typeof item !== 'object') return null
-  const status = item.status === 'sending' || !item.status ? 'pending' : item.status
-  return {
-    ...item,
-    status,
-    metadata: item.metadata ?? {},
-    encryptedEnvelopes: item.encryptedEnvelopes ?? {},
+interface OutboxItem {
+  id: string
+  status: 'pending' | 'sending' | 'sent' | 'failed'
+  timestamp: number
+  senderEns?: string | null
+  recipientEns: string
+  metadata?: {
+    subjectPreview?: string
+    toRecipients?: string[]
+    messageId?: string
+    attachments?: Array<{
+      filename?: string
+      name?: string
+      mimeType?: string
+      contentType?: string
+    }>
   }
+  encryptedEnvelopes?: Record<string, unknown>
+  errorMessage?: string
 }
 
-const safeJsonParse = (value, fallback) => {
+const normalizeOutboxItem = (item: unknown): OutboxItem | null => {
+  if (!item || typeof item !== 'object') return null
+  const obj = item as Partial<OutboxItem>
+  const status = obj.status === 'sending' || !obj.status ? 'pending' : obj.status
+  return {
+    ...obj,
+    status: status as 'pending' | 'sending' | 'sent' | 'failed',
+    metadata: obj.metadata ?? {},
+    encryptedEnvelopes: obj.encryptedEnvelopes ?? {},
+  } as OutboxItem
+}
+
+const safeJsonParse = <T,>(value: string | null, fallback: T): T => {
   try {
     return value ? JSON.parse(value) : fallback
   } catch {
@@ -70,7 +175,7 @@ const safeJsonParse = (value, fallback) => {
   }
 }
 
-const serializeForStorage = (value) => {
+const serializeForStorage = (value: unknown): string => {
   try {
     return JSON.stringify(value, (_, candidate) =>
       typeof candidate === 'bigint' ? candidate.toString() : candidate
@@ -84,7 +189,7 @@ const serializeForStorage = (value) => {
 const EMAIL_PACK_INDEX_PREFIX = 'dmail:email-packs:'
 const READ_STATUS_STORAGE_PREFIX = 'dmail:read-status:'
 
-const parseBooleanFlag = (value) => {
+const parseBooleanFlag = (value: unknown): boolean | undefined => {
   if (value == null) return undefined
   const normalized = String(value).trim().toLowerCase()
   if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true
@@ -92,13 +197,13 @@ const parseBooleanFlag = (value) => {
   return undefined
 }
 
-const getReadStatusStorageKey = (owner, namespace) => {
+const getReadStatusStorageKey = (owner: string | null, namespace: string | null): string | null => {
   if (!owner) return null
   const ns = namespace ? String(namespace).toLowerCase() : 'default'
   return `${READ_STATUS_STORAGE_PREFIX}${ns}:${owner}`
 }
 
-const loadReadStatusFromStorage = (key) => {
+const loadReadStatusFromStorage = (key: string | null): Set<string> => {
   if (typeof window === 'undefined' || !key) {
     return new Set()
   }
@@ -109,14 +214,14 @@ const loadReadStatusFromStorage = (key) => {
     if (!Array.isArray(parsed)) {
       return new Set()
     }
-    return new Set(parsed)
+    return new Set(parsed as string[])
   } catch (error) {
     console.warn('[readStatus] Failed to load status from storage', error)
     return new Set()
   }
 }
 
-const persistReadStatusToStorage = (key, ids) => {
+const persistReadStatusToStorage = (key: string | null, ids: Set<string>): void => {
   if (typeof window === 'undefined' || !key) {
     return
   }
@@ -127,7 +232,7 @@ const persistReadStatusToStorage = (key, ids) => {
   }
 }
 
-const resolveOneUploadPerEmailFlag = () => {
+const resolveOneUploadPerEmailFlag = (): boolean => {
   const envCandidates = [
     import.meta.env?.VITE_DMAIL_ONE_UPLOAD_PER_EMAIL,
     import.meta.env?.DMAIL_ONE_UPLOAD_PER_EMAIL,
@@ -138,10 +243,11 @@ const resolveOneUploadPerEmailFlag = () => {
       return parsed
     }
   }
-  if (typeof window !== 'undefined' && window.__DMAIL_CONFIG__) {
+  if (typeof window !== 'undefined' && (window as any).__DMAIL_CONFIG__) {
+    const config = (window as any).__DMAIL_CONFIG__ as Record<string, unknown>
     const browserCandidates = [
-      window.__DMAIL_CONFIG__.DMAIL_ONE_UPLOAD_PER_EMAIL,
-      window.__DMAIL_CONFIG__.VITE_DMAIL_ONE_UPLOAD_PER_EMAIL,
+      config.DMAIL_ONE_UPLOAD_PER_EMAIL,
+      config.VITE_DMAIL_ONE_UPLOAD_PER_EMAIL,
     ]
     for (const candidate of browserCandidates) {
       const parsed = parseBooleanFlag(candidate)
@@ -153,31 +259,36 @@ const resolveOneUploadPerEmailFlag = () => {
   return false
 }
 
-const getEmailPackIndexStorageKey = (owner) => {
+const getEmailPackIndexStorageKey = (owner: string | null): string | null => {
   if (!owner) return null
   return `${EMAIL_PACK_INDEX_PREFIX}${owner.toLowerCase()}`
 }
 
-const sanitizeEmailPackIndex = (owner, packs = []) => {
+interface EmailPackIndex {
+  owner: string | null
+  packs: unknown[]
+}
+
+const sanitizeEmailPackIndex = (owner: string | null, packs: unknown[] = []): EmailPackIndex => {
   return {
     owner: owner ?? null,
     packs: (packs ?? []).map((entry) => normalizeEmailPackIndexEntry(entry)).filter(Boolean),
   }
 }
 
-const loadEmailPackIndexFromStorage = (owner) => {
+const loadEmailPackIndexFromStorage = (owner: string | null): EmailPackIndex => {
   const key = getEmailPackIndexStorageKey(owner)
   if (typeof window === 'undefined' || !key) {
     return sanitizeEmailPackIndex(owner, [])
   }
-  const stored = safeJsonParse(window.localStorage.getItem(key), null)
+  const stored = safeJsonParse<{ packs?: unknown[] } | null>(window.localStorage.getItem(key), null)
   if (!stored || !Array.isArray(stored.packs)) {
     return sanitizeEmailPackIndex(owner, [])
   }
   return sanitizeEmailPackIndex(owner, stored.packs)
 }
 
-const persistEmailPackIndexToStorage = (owner, index) => {
+const persistEmailPackIndexToStorage = (owner: string | null, index: EmailPackIndex | null): void => {
   const key = getEmailPackIndexStorageKey(owner)
   if (typeof window === 'undefined' || !key) {
     return
@@ -186,7 +297,7 @@ const persistEmailPackIndexToStorage = (owner, index) => {
   window.localStorage.setItem(key, serializeForStorage(sanitized))
 }
 
-const deriveEmailPackEntries = (index, folder, mailboxNamespace) => {
+const deriveEmailPackEntries = (index: EmailPackIndex | null, folder: 'inbox' | 'sent', mailboxNamespace: string | null): MailboxEntry[] => {
   const normalizedFolder = folder === 'inbox' ? 'inbox' : 'sent'
   if (!index || !Array.isArray(index.packs)) {
     return []
@@ -227,7 +338,7 @@ const deriveEmailPackEntries = (index, folder, mailboxNamespace) => {
   return entries.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
 }
 
-const transformRemoteMailboxEntries = (entries, folder, mailboxNamespace) => {
+const transformRemoteMailboxEntries = (entries: unknown[], folder: 'inbox' | 'sent', mailboxNamespace: string | null): MailboxEntry[] => {
   if (!Array.isArray(entries)) {
     return []
   }
@@ -257,42 +368,42 @@ const transformRemoteMailboxEntries = (entries, folder, mailboxNamespace) => {
     }))
 }
 
-const getOutboxStorageKey = (address) => {
+const getOutboxStorageKey = (address: string | null): string | null => {
   if (!address) return null
   return `${OUTBOX_STORAGE_PREFIX}${address.toLowerCase()}`
 }
 
-const getOutboxLockKey = (address) => {
+const getOutboxLockKey = (address: string | null): string | null => {
   if (!address) return null
   return `${OUTBOX_LOCK_PREFIX}${address.toLowerCase()}`
 }
 
-const loadOutboxFromStorage = (address) => {
+const loadOutboxFromStorage = (address: string | null): OutboxItem[] => {
   if (typeof window === 'undefined') return []
   const key = getOutboxStorageKey(address)
   if (!key) return []
-  const rawItems = safeJsonParse(window.localStorage.getItem(key), [])
+  const rawItems = safeJsonParse<unknown[]>(window.localStorage.getItem(key), [])
   if (!Array.isArray(rawItems)) return []
   return rawItems
     .map(normalizeOutboxItem)
-    .filter((item) => item && item.id && item.encryptedEnvelopes?.recipient)
+    .filter((item): item is OutboxItem => item !== null && !!item.id && !!(item.encryptedEnvelopes as any)?.recipient)
 }
 
-const saveOutboxToStorage = (address, items) => {
+const saveOutboxToStorage = (address: string | null, items: OutboxItem[]): void => {
   if (typeof window === 'undefined') return
   const key = getOutboxStorageKey(address)
   if (!key) return
   window.localStorage.setItem(key, serializeForStorage(items ?? []))
 }
 
-const clearOutboxStorage = (address) => {
+const clearOutboxStorage = (address: string | null): void => {
   if (typeof window === 'undefined') return
   const key = getOutboxStorageKey(address)
   if (!key) return
   window.localStorage.removeItem(key)
 }
 
-function generateOutboxId() {
+function generateOutboxId(): string {
   try {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
       return crypto.randomUUID()
@@ -303,7 +414,7 @@ function generateOutboxId() {
   return `outbox-${Date.now()}-${Math.floor(Math.random() * 1e9)}`
 }
 
-function readIdentityRegistrationCache() {
+function readIdentityRegistrationCache(): Record<string, unknown> {
   if (typeof window === 'undefined') return {}
   const storage = window.localStorage
   try {
@@ -316,7 +427,7 @@ function readIdentityRegistrationCache() {
   }
 }
 
-function writeIdentityRegistrationCache(cache) {
+function writeIdentityRegistrationCache(cache: Record<string, unknown>): void {
   if (typeof window === 'undefined') return
   const storage = window.localStorage
   try {
@@ -354,7 +465,7 @@ function getBrowserHostname() {
     }
   }
   if (typeof window !== 'undefined') {
-    const cfg = window.__DMAIL_CONFIG__ ?? {}
+    const cfg = ((window as any).__DMAIL_CONFIG__ ?? {}) as Record<string, unknown>
     const configKeys = ['DMAIL_APP_DOMAIN', 'APP_DOMAIN', 'DOMAIN']
     for (const key of configKeys) {
       if (cfg[key]) {
@@ -365,49 +476,67 @@ function getBrowserHostname() {
   return DEFAULT_IDENTITY_DOMAIN
 }
 
-function getMailboxNamespace(domain) {
+function getMailboxNamespace(domain: string | null): string {
   return `mailbox:${domain ?? DEFAULT_IDENTITY_DOMAIN}`
 }
 
-function namespacedMessageId(rawId, namespace) {
-  if (!rawId) return rawId
-  if (!namespace) return rawId
+function namespacedMessageId(rawId: string | null | undefined, namespace: string | null): string {
+  if (!rawId) return String(rawId ?? '')
+  if (!namespace) return String(rawId)
   if (String(rawId).startsWith(`${namespace}:`)) {
     return String(rawId)
   }
   return `${namespace}:${rawId}`
 }
 
-function stripNamespaceFromId(rawId, namespace) {
-  if (!rawId || !namespace) return rawId
+function stripNamespaceFromId(rawId: string | null | undefined, namespace: string | null): string {
+  if (!rawId || !namespace) return String(rawId ?? '')
   const prefix = `${namespace}:`
   const value = String(rawId)
   return value.startsWith(prefix) ? value.substring(prefix.length) : value
 }
 
 
-function App() {
+interface ComposeState {
+  to: string
+  subject: string
+  message: string
+  recipientPublicKey: string
+  attachments: Array<{
+    filename: string
+    mimeType: string
+    data: string
+  }>
+}
+
+interface SelectedEmail extends MailboxEntry {
+  decrypted?: DecryptedEmail
+  encrypted?: EncryptedEmail
+  _signatureValid?: boolean | null
+}
+
+function App(): React.JSX.Element {
   const appConfig = useMemo(
     () => ({
       oneUploadPerEmail: resolveOneUploadPerEmailFlag(),
     }),
     []
   )
-  const [walletAddress, setWalletAddress] = useState(null)
-  const [ensName, setEnsName] = useState(null)
-  const [provider, setProvider] = useState(null)
+  const [walletAddress, setWalletAddress] = useState<string | null>(null)
+  const [ensName, setEnsName] = useState<string | null>(null)
+  const [provider, setProvider] = useState<BrowserProvider | null>(null)
   const [statusMessage, setStatusMessage] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
-  const [identityPublicKey, setIdentityPublicKey] = useState(null)
-  const [, setMailboxUploadResultState] = useState(null)
-  const [mailboxRoot, setMailboxRoot] = useState(null)
-  const mailboxRootRef = useRef(null)
-  const [mailboxEntries, setMailboxEntries] = useState([])
-  const [sentEntries, setSentEntries] = useState([])
-  const [selectedEmails, setSelectedEmails] = useState([]) // Track selected emails for deletion
-  const [outboxItems, setOutboxItems] = useState([])
+  const [identityPublicKey, setIdentityPublicKey] = useState<string | null>(null)
+  const [, setMailboxUploadResultState] = useState<SynapseUploadResult | null>(null)
+  const [mailboxRoot, setMailboxRoot] = useState<string | null>(null)
+  const mailboxRootRef = useRef<string | null>(null)
+  const [mailboxEntries, setMailboxEntries] = useState<MailboxEntry[]>([])
+  const [sentEntries, setSentEntries] = useState<MailboxEntry[]>([])
+  const [selectedEmails, setSelectedEmails] = useState<string[]>([]) // Track selected emails for deletion
+  const [outboxItems, setOutboxItems] = useState<OutboxItem[]>([])
   const outboxProcessingRef = useRef(false)
-  const outboxLockOwnerRef = useRef(
+  const outboxLockOwnerRef = useRef<string>(
     typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `tab-${Date.now()}-${Math.random()}`
   )
   const manualDisconnectRef = useRef(false) // Track manual disconnect to prevent auto-reconnect
@@ -417,36 +546,36 @@ function App() {
     mailboxRootRef.current = mailboxRoot
   }, [mailboxRoot])
   const [loadingInbox, setLoadingInbox] = useState(false)
-  const [selectedEmail, setSelectedEmail] = useState(null)
+  const [selectedEmail, setSelectedEmail] = useState<SelectedEmail | null>(null)
   const [sending, setSending] = useState(false)
   const [showCompose, setShowCompose] = useState(false)
-  const [activeView, setActiveView] = useState('inbox')
+  const [activeView, setActiveView] = useState<'inbox' | 'sent' | 'calendar'>('inbox')
   const [searchQuery, setSearchQuery] = useState('')
   const [calendarFullPage, setCalendarFullPage] = useState(false)
   const [fetchingPubKey, setFetchingPubKey] = useState(false)
-  const [pubKeyFetchError, setPubKeyFetchError] = useState(null)
+  const [pubKeyFetchError, setPubKeyFetchError] = useState<string | null>(null)
   const [showManualPubKey, setShowManualPubKey] = useState(false)
-  const [composeState, setComposeState] = useState({
+  const [composeState, setComposeState] = useState<ComposeState>({
     to: '',
     subject: '',
     message: '',
     recipientPublicKey: '',
     attachments: [],
   })
-  const [calendarEvents, setCalendarEvents] = useState([])
-  const [calendarUploadResult, setCalendarUploadResultState] = useState(null)
-  const calendarUploadResultRef = useRef(null)
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([])
+  const [calendarUploadResult, setCalendarUploadResultState] = useState<SynapseUploadResult | null>(null)
+  const calendarUploadResultRef = useRef<SynapseUploadResult | null>(null)
   const [calendarLoading, setCalendarLoading] = useState(false)
   const [calendarError, setCalendarError] = useState('')
   const [showEventModal, setShowEventModal] = useState(false)
   const [savingEvent, setSavingEvent] = useState(false)
   const [identityDeriving, setIdentityDeriving] = useState(false)
   const [identityStatusMessage, setIdentityStatusMessage] = useState('')
-  const identityMaterialRef = useRef(null)
-  const identityEnsRef = useRef(null)
-  const identityRegistrationCacheRef = useRef(readIdentityRegistrationCache())
-  const [emailPackIndex, setEmailPackIndex] = useState(null)
-  const emailPackIndexRef = useRef(null)
+  const identityMaterialRef = useRef<IdentityMaterial | null>(null)
+  const identityEnsRef = useRef<string | null>(null)
+  const identityRegistrationCacheRef = useRef<Record<string, unknown>>(readIdentityRegistrationCache())
+  const [emailPackIndex, setEmailPackIndex] = useState<EmailPackIndex | null>(null)
+  const emailPackIndexRef = useRef<EmailPackIndex | null>(null)
   const emailPackOwner = useMemo(() => {
     if (walletAddress) return walletAddress.toLowerCase()
     if (ensName) return ensName.toLowerCase()
@@ -503,7 +632,7 @@ function App() {
   }, [])
 
   const markMessageAsRead = useCallback(
-    (messageId) => {
+    (messageId: string | null | undefined) => {
       if (!messageId) return
       const normalizedId = String(messageId)
       setReadMessageIds((prev) => {
@@ -520,7 +649,7 @@ function App() {
   )
 
   const updateOutboxState = useCallback(
-    (updater) => {
+    (updater: OutboxItem[] | ((prev: OutboxItem[]) => OutboxItem[])) => {
       if (!walletAddress) return
       setOutboxItems((prev) => {
         const next = typeof updater === 'function' ? updater(prev) : updater
@@ -532,7 +661,7 @@ function App() {
   )
 
   const enqueueOutboxItem = useCallback(
-    (item) => {
+    (item: OutboxItem) => {
       updateOutboxState((prev) => [item, ...(Array.isArray(prev) ? prev : [])])
     },
     [updateOutboxState]
